@@ -1,0 +1,8 @@
+{
+  "name": "opencode",
+  "version": "0.1.1",
+  "description": "Use opencode from Claude Code to review code or delegate tasks.",
+  "author": {
+    "name": "domo"
+  }
+}

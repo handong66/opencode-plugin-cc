@@ -1,0 +1,21 @@
+{
+  "name": "opencode-plugin-cc",
+  "owner": {
+    "name": "domo"
+  },
+  "metadata": {
+    "description": "opencode plugins to use in Claude Code for delegation and code review.",
+    "version": "0.1.1"
+  },
+  "plugins": [
+    {
+      "name": "opencode",
+      "description": "Use opencode from Claude Code to review code or delegate tasks.",
+      "version": "0.1.1",
+      "author": {
+        "name": "domo"
+      },
+      "source": "./plugins/opencode"
+    }
+  ]
+}

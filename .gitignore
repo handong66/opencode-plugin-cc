@@ -1,0 +1,8 @@
+node_modules/
+*.log
+*.tsbuildinfo
+.DS_Store
+**/.DS_Store
+output/
+*.tgz
+*.zip

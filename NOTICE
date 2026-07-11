@@ -1,0 +1,12 @@
+opencode plugin for Claude Code
+
+This project is a derivative work modeled on the Codex plugin for Claude Code
+(https://github.com/openai/codex-plugin-cc), Copyright OpenAI, licensed under
+the Apache License, Version 2.0.
+
+Derived elements include the slash-command contracts, subagent and skill
+structure, prompt templates, review output schema, hook wiring, and the
+per-workspace state layout. The runtime implementation targets the opencode
+CLI's headless `run` mode (https://opencode.ai) and was written for this
+project. opencode is a product of Anomaly Innovations; this project is not
+affiliated with or endorsed by Anomaly Innovations or OpenAI.
