@@ -4,6 +4,10 @@ import { test } from "node:test";
 import { makeTempDir } from "./helpers.mjs";
 
 process.env.CLAUDE_PLUGIN_DATA = makeTempDir("opencode-state-test");
+// The suite must own both env vars: on a machine with the plugin installed,
+// the SessionStart hook exports the namespaced dir into the shell, which
+// would otherwise take precedence and break the CLAUDE_PLUGIN_DATA tests.
+delete process.env.OPENCODE_COMPANION_DATA_DIR;
 const { upsertJob, findJob, listJobs, setConfig, getConfig, resolveStateDir } = await import(
   "../plugins/opencode/scripts/lib/state.mjs"
 );
