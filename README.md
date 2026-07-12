@@ -4,6 +4,8 @@ Use [opencode](https://opencode.ai) from inside Claude Code for code reviews or 
 
 Because opencode fronts many providers (Anthropic, OpenAI, Google, open-weight and free opencode zen models), this effectively lets Claude Code hand work to whichever second model you have configured in opencode.
 
+Project write-up: [han-dong.link/en/work/opencode-plugin-cc](https://han-dong.link/en/work/opencode-plugin-cc)
+
 ## What You Get
 
 - `/opencode:review` — a read-only opencode code review of your local git changes, with structured findings
