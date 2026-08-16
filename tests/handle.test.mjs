@@ -94,3 +94,40 @@ test("review announces its handle too", () => {
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout.split("\n")[0], /^Job: \S+ \(review, running\)/);
 });
+
+// The result-handling skill used to promise `JSON.parse(stdout)` was "always
+// safe" under `--json`. It is safe for every path that reaches a run — which is
+// what FB-01 and FB-02 fixed — but not for a request rejected before one
+// starts, and those paths print prose on stdout to this day. This pins both
+// halves so the sentence in the skill stays true of the runtime.
+test("--json emits a document for every run, and prose only for a rejected request", () => {
+  const cwd = makeTempGitRepo();
+
+  // Reached a run: a document whatever the exit code says.
+  for (const [mode, expectedStatus] of [["fail", 1], ["silent", 1], ["success", 0]]) {
+    const fake = makeFakeEnv({ mode });
+    const run = runCompanion(["task", "--json", "--", "do the work"], { env: fake.env, cwd });
+    assert.equal(run.status, expectedStatus, `${mode}: ${run.stdout}${run.stderr}`);
+    const document = JSON.parse(run.stdout);
+    assert.equal(typeof document.jobId, "string", `${mode} must still address its job`);
+  }
+
+  // Rejected before a run: plain text on stdout and exit 1. A caller must be
+  // able to tell these apart by parse failure alone, so none of them may look
+  // like a result.
+  const rejected = [
+    ["task", "--json", "--timeout-ms", "later", "--", "x"],
+    ["task", "--json"],
+    ["review", "--json", "--scope", "staged"],
+    ["review", "--json", "--base", "nosuchref"],
+    ["status", "no-such-job", "--json"],
+    ["result", "no-such-job", "--json"]
+  ];
+  for (const argv of rejected) {
+    const fake = makeFakeEnv({ mode: "review-json" });
+    const run = runCompanion(argv, { env: fake.env, cwd });
+    assert.equal(run.status, 1, `${argv.join(" ")}: ${run.stdout}${run.stderr}`);
+    assert.throws(() => JSON.parse(run.stdout), `${argv.join(" ")} must not look like a result`);
+    assert.ok(run.stdout.trim().length > 0, `${argv.join(" ")} must say what was wrong`);
+  }
+});
