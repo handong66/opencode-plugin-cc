@@ -9,12 +9,13 @@ import { fileURLToPath } from "node:url";
 import { tokenize, parseFlags } from "./lib/args.mjs";
 import { extractClaudeMessages, buildHandoffTranscript } from "./lib/claude-transcript.mjs";
 import { collectReviewInput } from "./lib/git.mjs";
-import { getOpencodeAvailability, runOpencode } from "./lib/opencodecli.mjs";
+import { classifyOutcome, getOpencodeAvailability, runOpencode } from "./lib/opencodecli.mjs";
 import { terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
   fmtDuration,
   firstLine,
+  renderIncompleteOutput,
   renderJobDetail,
   renderJobList,
   renderReviewOutput,
@@ -108,12 +109,29 @@ async function executeJob({ kind, cwd, opencodeOptions, promptPreview, model = n
   });
 
   const parsed = outcome.parsed ?? {};
-  const ok = outcome.exitCode === 0 && typeof parsed.text === "string" && !outcome.spawnError;
+  // Exit code 0 is not a verdict: opencode exits 0 after auto-rejecting a
+  // permission request, after burning its tool budget, and after narrating.
+  const classification = classifyOutcome({
+    exitCode: outcome.exitCode,
+    spawnError: outcome.spawnError,
+    parsed: outcome.parsed,
+    toolEventCount: parsed.toolEventCount ?? 0,
+    promptChars: String(opencodeOptions.prompt ?? "").length,
+    hasStructuredOutput: Boolean(parsed.structuredOutput)
+  });
+  const ok = classification.state === "completed";
+  const incomplete = classification.state === "incomplete";
+  for (const warning of classification.warnings) {
+    process.stderr.write(`warning: ${warning}\n`);
+  }
   const payload = {
     kind,
     rawOutput: parsed.text ?? "",
     structuredOutput: parsed.structuredOutput ?? null,
     stopReason: parsed.stopReason ?? null,
+    outputState: classification.state,
+    outputStateReason: classification.reason,
+    toolEventCount: classification.toolEventCount,
     opencodeSessionId: parsed.sessionId ?? null,
     exitCode: outcome.exitCode,
     spawnError: outcome.spawnError,
@@ -127,7 +145,10 @@ async function executeJob({ kind, cwd, opencodeOptions, promptPreview, model = n
   const job = {
     id: jobId,
     kind,
-    status: wasCancelled ? "cancelled" : ok ? "completed" : "failed",
+    status: wasCancelled ? "cancelled" : ok ? "completed" : incomplete ? "incomplete" : "failed",
+    outputState: classification.state,
+    outputStateReason: classification.reason,
+    stopReason: payload.stopReason,
     opencodeSessionId: payload.opencodeSessionId,
     durationMs: outcome.durationMs,
     endedAt: new Date().toISOString(),
@@ -137,7 +158,9 @@ async function executeJob({ kind, cwd, opencodeOptions, promptPreview, model = n
         ? payload.structuredOutput?.verdict
           ? firstLine(`${payload.structuredOutput.verdict}: ${payload.structuredOutput.summary ?? ""}`, 120)
           : firstLine(payload.rawOutput, 120)
-        : `failed (exit ${outcome.exitCode ?? "?"})`
+        : incomplete
+          ? `incomplete (${classification.reason}, stopReason ${payload.stopReason ?? "unknown"}): ${firstLine(payload.rawOutput, 80)}`
+          : `failed (exit ${outcome.exitCode ?? "?"})`
   };
 
   const fullJob = { ...findJob(cwd, jobId), ...job };
@@ -145,12 +168,22 @@ async function executeJob({ kind, cwd, opencodeOptions, promptPreview, model = n
     ? kind === "review" || kind === "adversarial-review"
       ? renderReviewOutput(fullJob, payload)
       : renderTaskOutput(fullJob, payload)
-    : renderTaskFailure(fullJob, payload);
+    : incomplete
+      ? renderIncompleteOutput(fullJob, payload)
+      : renderTaskFailure(fullJob, payload);
 
   writeJobFile(cwd, jobId, payload);
   upsertJob(cwd, job);
 
-  return { ok, jobId, job: fullJob, payload };
+  return { ok, incomplete, outputState: classification.state, jobId, job: fullJob, payload };
+}
+
+// 0 = a real answer, 1 = the run failed, 2 = the run ended without an answer.
+function exitCodeForOutputState(outputState) {
+  if (outputState === "completed") {
+    return 0;
+  }
+  return outputState === "incomplete" ? 2 : 1;
 }
 
 async function commandTask(tokens) {
@@ -191,7 +224,7 @@ async function commandTask(tokens) {
     }
   }
 
-  const { ok, jobId, payload } = await executeJob({
+  const { ok, jobId, outputState, payload } = await executeJob({
     kind: "task",
     cwd,
     model: flags.get("--model") ?? null,
@@ -212,6 +245,10 @@ async function commandTask(tokens) {
     printJson({
       ok,
       jobId,
+      outputState,
+      outputStateReason: payload.outputStateReason,
+      stopReason: payload.stopReason,
+      toolEventCount: payload.toolEventCount,
       rawOutput: payload.rawOutput,
       opencodeSessionId: payload.opencodeSessionId,
       exitCode: payload.exitCode,
@@ -220,9 +257,7 @@ async function commandTask(tokens) {
   } else {
     print(payload.rendered);
   }
-  if (!ok) {
-    process.exitCode = 1;
-  }
+  process.exitCode = exitCodeForOutputState(outputState);
 }
 
 async function commandReview(tokens, { adversarial }) {
@@ -268,7 +303,7 @@ async function commandReview(tokens, { adversarial }) {
   });
 
   const kind = adversarial ? "adversarial-review" : "review";
-  const { ok, payload } = await executeJob({
+  const { ok, outputState, payload } = await executeJob({
     kind,
     cwd,
     promptPreview: adversarial
@@ -284,13 +319,19 @@ async function commandReview(tokens, { adversarial }) {
   });
 
   if (asJson) {
-    printJson({ ok, review: payload.structuredOutput, rawOutput: payload.rawOutput });
+    printJson({
+      ok,
+      outputState,
+      outputStateReason: payload.outputStateReason,
+      stopReason: payload.stopReason,
+      toolEventCount: payload.toolEventCount,
+      review: payload.structuredOutput,
+      rawOutput: payload.rawOutput
+    });
   } else {
     print(payload.rendered);
   }
-  if (!ok) {
-    process.exitCode = 1;
-  }
+  process.exitCode = exitCodeForOutputState(outputState);
 }
 
 function readDefaultModelFromConfig() {
@@ -440,7 +481,7 @@ function commandResult(tokens) {
   const { flags, rest } = parseFlags(tokens, { booleanFlags: ["--json"] });
   const cwd = process.cwd();
   const job = pickJob(cwd, rest[0] ?? null, (candidate) =>
-    ["completed", "failed"].includes(candidate.status)
+    ["completed", "failed", "incomplete"].includes(candidate.status)
   );
 
   if (!job) {
@@ -586,7 +627,7 @@ async function commandTransfer(tokens) {
   ].join("\n");
 
   const cwd = process.cwd();
-  const { ok, payload } = await executeJob({
+  const { ok, outputState, payload } = await executeJob({
     kind: "transfer",
     cwd,
     model: flags.get("--model") ?? null,
@@ -601,7 +642,7 @@ async function commandTransfer(tokens) {
 
   if (!ok) {
     print(payload.rendered);
-    process.exitCode = 1;
+    process.exitCode = exitCodeForOutputState(outputState);
     return;
   }
 

@@ -32,6 +32,41 @@ export function renderTaskOutput(job, payload) {
   return `${body}\n${footer(job)}`;
 }
 
+const INCOMPLETE_REASON_DETAIL = {
+  "empty-text": "opencode produced no final text at all.",
+  "stop-reason": "The run stopped for a reason that is not a finished turn.",
+  narration:
+    "The last message reads like narration about work in progress, not the requested answer (tool calls happened, but the final text is very short)."
+};
+
+// The fourth renderer: a run that exited 0 without producing an answer. It must
+// never look like a success, and it must never hide the partial output either.
+export function renderIncompleteOutput(job, payload) {
+  const text = String(payload.rawOutput ?? "").trim();
+  const toolCalls = Number(payload.toolEventCount ?? 0);
+  const lines = [
+    `opencode stopped before producing a final answer (stopReason: ${payload.stopReason ?? "unknown"}, ${toolCalls} tool call${toolCalls === 1 ? "" : "s"}, ${text.length} chars of text).`
+  ];
+  const detail = INCOMPLETE_REASON_DETAIL[payload.outputStateReason];
+  if (detail) {
+    lines.push(detail);
+  }
+  lines.push("Partial output below — treat it as work-in-progress, not as the answer.");
+  lines.push("", text || "[opencode produced no text]");
+
+  const stderr = String(payload.stderrTail ?? "").trim();
+  if (stderr) {
+    lines.push("", "Most recent stderr:", "```", stderr.split(/\r?\n/).slice(-5).join("\n"), "```");
+  }
+
+  lines.push(
+    "",
+    "Recover with: /opencode:rescue --resume Return only the final answer itself. Do not read any more files and do not call any tools."
+  );
+  lines.push(footer(job));
+  return lines.join("\n");
+}
+
 export function renderTaskFailure(job, payload) {
   const lines = [`opencode ${job.kind} run failed (exit code ${payload.exitCode ?? "unknown"}).`];
   if (payload.spawnError) {
@@ -136,6 +171,12 @@ export function renderJobDetail(job, payload, logTail) {
   if (job.model) {
     lines.push(`Model: ${job.model}`);
   }
+  if (payload?.outputState || job.outputState) {
+    lines.push(`Output state: ${payload?.outputState ?? job.outputState}`);
+  }
+  if (payload?.stopReason) {
+    lines.push(`Stop reason: ${payload.stopReason}`);
+  }
   if (job.opencodeSessionId) {
     lines.push(`opencode session: ${job.opencodeSessionId} (opencode -s ${job.opencodeSessionId})`);
   }
@@ -145,7 +186,7 @@ export function renderJobDetail(job, payload, logTail) {
   if (logTail) {
     lines.push("", "Recent activity:", "```", logTail, "```");
   }
-  if (payload && (job.status === "completed" || job.status === "failed")) {
+  if (payload && ["completed", "failed", "incomplete"].includes(job.status)) {
     lines.push("", "Stored output available. Run /opencode:result " + job.id + " to see it.");
   }
   return lines.join("\n");

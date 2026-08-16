@@ -8,6 +8,107 @@ export function stripAnsi(text) {
   return String(text ?? "").replace(ANSI_PATTERN, "");
 }
 
+// Stop reasons that mean "the model finished its turn on purpose".
+export const CLEAN_STOP_REASONS = new Set(["stop", "end_turn", "end-turn", "endturn", "complete"]);
+// Known reasons for a run ending before a final answer existed. Deliberately a
+// blacklist: opencode may add vocabulary, and an unknown value must never flip
+// a real answer into `incomplete` (it only raises a warning).
+export const INCOMPLETE_STOP_REASONS = new Set([
+  "tool-calls",
+  "tool_calls",
+  "toolcalls",
+  "length",
+  "max-tokens",
+  "max_tokens",
+  "max-turns",
+  "max_turns",
+  "aborted",
+  "abort",
+  "cancelled",
+  "canceled",
+  "error",
+  "content-filter",
+  "content_filter",
+  "permission-denied",
+  "permission_denied"
+]);
+// Below this many characters a final answer looks like narration rather than an
+// answer — but only when the run did work (tool calls) for a prompt big enough
+// that a one-liner cannot plausibly be the deliverable.
+export const DEFAULT_MIN_ANSWER_CHARS = 200;
+export const NARRATION_PROMPT_CHARS = 1000;
+export const MIN_ANSWER_CHARS_ENV = "OPENCODE_COMPANION_MIN_ANSWER_CHARS";
+
+function resolveMinAnswerChars(minAnswerChars, env) {
+  if (minAnswerChars !== null && minAnswerChars !== undefined && minAnswerChars !== "") {
+    const explicit = Number(minAnswerChars);
+    if (Number.isFinite(explicit) && explicit >= 0) {
+      return explicit;
+    }
+  }
+  const fromEnv = Number(env?.[MIN_ANSWER_CHARS_ENV]);
+  return Number.isFinite(fromEnv) && fromEnv >= 0 ? fromEnv : DEFAULT_MIN_ANSWER_CHARS;
+}
+
+// Three-state verdict for one opencode run. `exitCode === 0` on its own proves
+// nothing: opencode exits 0 after auto-rejecting a permission request, after
+// running out of tool budget, and after emitting a single line of narration.
+export function classifyOutcome({
+  exitCode,
+  spawnError = null,
+  parsed,
+  toolEventCount = 0,
+  promptChars = 0,
+  hasStructuredOutput = false,
+  minAnswerChars = null,
+  env = process.env
+} = {}) {
+  const stopReason = parsed?.stopReason ?? null;
+  const text = String(parsed?.text ?? "").trim();
+  const base = {
+    stopReason,
+    textChars: text.length,
+    toolEventCount: Number(toolEventCount) || 0,
+    warnings: []
+  };
+
+  if (spawnError || exitCode !== 0 || !parsed) {
+    return {
+      ...base,
+      state: "failed",
+      reason: spawnError ? "spawn-error" : !parsed ? "no-events" : "exit-code"
+    };
+  }
+
+  if (text.length === 0) {
+    return { ...base, state: "incomplete", reason: "empty-text" };
+  }
+
+  if (stopReason) {
+    const normalized = String(stopReason).trim().toLowerCase();
+    if (INCOMPLETE_STOP_REASONS.has(normalized)) {
+      return { ...base, state: "incomplete", reason: "stop-reason" };
+    }
+    if (!CLEAN_STOP_REASONS.has(normalized)) {
+      base.warnings.push(
+        `opencode reported an unrecognised stopReason "${stopReason}"; treating the run as complete. Report it if the answer looks truncated.`
+      );
+    }
+  }
+
+  const threshold = resolveMinAnswerChars(minAnswerChars, env);
+  if (
+    !hasStructuredOutput &&
+    base.toolEventCount > 0 &&
+    promptChars >= NARRATION_PROMPT_CHARS &&
+    text.length < threshold
+  ) {
+    return { ...base, state: "incomplete", reason: "narration" };
+  }
+
+  return { ...base, state: "completed", reason: null };
+}
+
 export function getOpencodeAvailability() {
   const version = spawnSync("opencode", ["--version"], { encoding: "utf8" });
   if (version.error || version.status !== 0) {
@@ -129,6 +230,10 @@ export function parseEventStream(stdout) {
   let stopReason = null;
   const textPartsByMessage = new Map();
   const messageOrder = [];
+  // Tool parts stream one event per state change (pending/running/completed),
+  // so count distinct part ids — the interesting number is "did this run do
+  // work", not how chatty the stream was.
+  const toolPartIds = new Set();
 
   for (const event of events) {
     sessionId = event.sessionID ?? event.part?.sessionID ?? sessionId;
@@ -138,6 +243,9 @@ export function parseEventStream(stdout) {
     }
     if (event.type === "step_finish" && typeof part.reason === "string") {
       stopReason = part.reason;
+    }
+    if (event.type === "tool") {
+      toolPartIds.add(part.id ?? `tool-${toolPartIds.size}`);
     }
     if (event.type === "text" && typeof part.text === "string") {
       const messageId = part.messageID ?? "message";
@@ -155,7 +263,7 @@ export function parseEventStream(stdout) {
     ? [...textPartsByMessage.get(lastMessageId).values()].join("\n\n").trim()
     : "";
 
-  return { text, sessionId, stopReason, eventCount: events.length };
+  return { text, sessionId, stopReason, eventCount: events.length, toolEventCount: toolPartIds.size };
 }
 
 // The review contract asks for bare JSON, but models routinely wrap it in
@@ -278,6 +386,7 @@ export function runOpencode(options, { cwd, logFile = null, onSpawn = null } = {
             text: stream.text,
             sessionId: stream.sessionId,
             stopReason: stream.stopReason,
+            toolEventCount: stream.toolEventCount,
             structuredOutput: options.jsonSchema ? extractStructuredJson(stream.text) : null
           }
         : null;

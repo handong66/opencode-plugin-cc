@@ -2,6 +2,7 @@
 
 ## Unreleased — 0.2.0
 
+- **Contract change.** Runs are now classified three ways instead of pass/fail. A run that exits 0 without producing an answer is `incomplete`, not `completed`: empty final text, a stop reason that is not a finished turn (`tool-calls`, `length`, `aborted`, …), or a very short final message after tool calls on a large prompt. `incomplete` runs exit with code **2** (failures keep 1), get the job status `incomplete`, and render through a dedicated renderer that labels the partial output as work-in-progress, prints the tail of stderr (which is where opencode reports auto-rejected paths), and gives a `/opencode:rescue --resume` recovery command. `task`/`review` `--json` now include `outputState`, `outputStateReason`, `stopReason` and `toolEventCount`; `status`/`result` detail show the output state and stop reason. Unknown stop reasons only warn on stderr — they never downgrade a run. The narration heuristic threshold is `OPENCODE_COMPANION_MIN_ANSWER_CHARS` (default 200).
 - Rescue docs (`skills/opencode-cli-runtime/SKILL.md`, `agents/opencode-rescue.md`) now ship explicit `Bash` invocation templates with `timeout: 600000` and a `run_in_background: true` variant for long runs. Forwarders previously inherited Claude Code's 120s default, which killed 16% of `task` calls with `Exit code 143` mid-run.
 
 ## 0.1.1

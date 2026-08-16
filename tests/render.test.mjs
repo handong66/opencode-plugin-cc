@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { renderReviewOutput, renderTaskOutput, firstLine, fmtDuration } from "../plugins/opencode/scripts/lib/render.mjs";
+import {
+  renderIncompleteOutput,
+  renderJobDetail,
+  renderReviewOutput,
+  renderTaskOutput,
+  firstLine,
+  fmtDuration
+} from "../plugins/opencode/scripts/lib/render.mjs";
 
 const job = {
   id: "review-x",
@@ -39,6 +46,47 @@ test("renderTaskOutput appends the job footer", () => {
   const rendered = renderTaskOutput(job, { rawOutput: "did the thing" });
   assert.match(rendered, /did the thing/);
   assert.match(rendered, /Job: review-x \(review, completed, 1m05s\)/);
+});
+
+test("renderIncompleteOutput labels the run, keeps partial text, and gives a recovery command", () => {
+  const rendered = renderIncompleteOutput(
+    { ...job, kind: "task", status: "incomplete", durationMs: 124_000 },
+    {
+      rawOutput: "Parent contracts read. Now the source files.",
+      stopReason: "tool-calls",
+      outputState: "incomplete",
+      outputStateReason: "stop-reason",
+      toolEventCount: 3,
+      stderrTail: "! permission requested: external_directory (/private/tmp/*); auto-rejecting"
+    }
+  );
+  assert.match(rendered, /stopped before producing a final answer \(stopReason: tool-calls, 3 tool calls, 44 chars of text\)/);
+  assert.match(rendered, /treat it as work-in-progress, not as the answer/);
+  assert.match(rendered, /Parent contracts read\./);
+  assert.match(rendered, /external_directory/);
+  assert.match(rendered, /Recover with: \/opencode:rescue --resume/);
+  assert.match(rendered, /Job: review-x \(task, incomplete, 2m04s\)/);
+});
+
+test("renderIncompleteOutput never presents an empty answer as output", () => {
+  const rendered = renderIncompleteOutput(
+    { ...job, kind: "task", status: "incomplete", durationMs: 7_000 },
+    { rawOutput: "", stopReason: "stop", outputStateReason: "empty-text", toolEventCount: 0 }
+  );
+  assert.match(rendered, /0 tool calls, 0 chars of text/);
+  assert.match(rendered, /opencode produced no final text at all/);
+  assert.doesNotMatch(rendered, /\[opencode returned no final output\]/);
+});
+
+test("renderJobDetail surfaces the output state and stop reason", () => {
+  const rendered = renderJobDetail(
+    { ...job, kind: "task", status: "incomplete", createdAt: "t0", updatedAt: "t1" },
+    { outputState: "incomplete", stopReason: "tool-calls" },
+    ""
+  );
+  assert.match(rendered, /Output state: incomplete/);
+  assert.match(rendered, /Stop reason: tool-calls/);
+  assert.match(rendered, /Run \/opencode:result review-x/);
 });
 
 test("format helpers behave", () => {

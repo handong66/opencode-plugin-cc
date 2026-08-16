@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  DEFAULT_MIN_ANSWER_CHARS,
   buildOpencodeArgs,
+  classifyOutcome,
   composePrompt,
   extractStructuredJson,
   parseEventStream,
@@ -78,6 +80,102 @@ test("parseEventStream keeps the last payload per part and the newest message", 
 test("parseEventStream returns null when no events are present", () => {
   assert.equal(parseEventStream(""), null);
   assert.equal(parseEventStream("plain text output"), null);
+});
+
+test("parseEventStream counts tool calls once per tool part", () => {
+  const stdout = [
+    JSON.stringify({ type: "step_start", sessionID: "ses_x", part: { id: "prt_s", messageID: "m1", type: "step-start" } }),
+    JSON.stringify({ type: "tool", sessionID: "ses_x", part: { id: "prt_t1", messageID: "m1", tool: "read", state: { status: "running" } } }),
+    JSON.stringify({ type: "tool", sessionID: "ses_x", part: { id: "prt_t1", messageID: "m1", tool: "read", state: { status: "completed" } } }),
+    JSON.stringify({ type: "tool", sessionID: "ses_x", part: { id: "prt_t2", messageID: "m1", tool: "grep", state: { status: "completed" } } }),
+    JSON.stringify({ type: "text", sessionID: "ses_x", part: { id: "prt_x1", messageID: "m1", type: "text", text: "reading" } })
+  ].join("\n");
+  assert.equal(parseEventStream(stdout).toolEventCount, 2);
+  assert.equal(parseEventStream(JSON.stringify({ type: "step_start", part: { id: "p" } })).toolEventCount, 0);
+});
+
+test("classifyOutcome reports failed for spawn errors, bad exits, and unparsable streams", () => {
+  assert.equal(
+    classifyOutcome({ exitCode: null, spawnError: "ENOENT", parsed: null }).state,
+    "failed"
+  );
+  assert.equal(classifyOutcome({ exitCode: 1, parsed: { text: "boom" } }).state, "failed");
+  assert.equal(classifyOutcome({ exitCode: 0, parsed: null }).state, "failed");
+});
+
+test("classifyOutcome marks empty answers incomplete instead of completed", () => {
+  const result = classifyOutcome({ exitCode: 0, parsed: { text: "   \n  ", stopReason: "stop" } });
+  assert.equal(result.state, "incomplete");
+  assert.equal(result.reason, "empty-text");
+  assert.equal(result.textChars, 0);
+});
+
+test("classifyOutcome downgrades known-bad stop reasons but only warns on unknown ones", () => {
+  const answer = "x".repeat(DEFAULT_MIN_ANSWER_CHARS + 10);
+  const toolCalls = classifyOutcome({
+    exitCode: 0,
+    parsed: { text: answer, stopReason: "tool-calls" }
+  });
+  assert.equal(toolCalls.state, "incomplete");
+  assert.equal(toolCalls.reason, "stop-reason");
+  assert.equal(toolCalls.stopReason, "tool-calls");
+
+  assert.equal(classifyOutcome({ exitCode: 0, parsed: { text: answer, stopReason: "length" } }).state, "incomplete");
+
+  // opencode may add vocabulary; unknown values must never flip the verdict.
+  const unknown = classifyOutcome({
+    exitCode: 0,
+    parsed: { text: answer, stopReason: "brand-new-reason" }
+  });
+  assert.equal(unknown.state, "completed");
+  assert.equal(unknown.warnings.length, 1);
+  assert.match(unknown.warnings[0], /brand-new-reason/);
+
+  assert.equal(classifyOutcome({ exitCode: 0, parsed: { text: answer, stopReason: "end_turn" } }).state, "completed");
+  assert.equal(classifyOutcome({ exitCode: 0, parsed: { text: answer, stopReason: null } }).warnings.length, 0);
+});
+
+test("classifyOutcome treats narration after tool calls as incomplete", () => {
+  const narration = { text: "Parent contracts read. Now the source files.", stopReason: "stop" };
+  const bigPrompt = 7107;
+
+  const narrated = classifyOutcome({
+    exitCode: 0,
+    parsed: narration,
+    toolEventCount: 4,
+    promptChars: bigPrompt
+  });
+  assert.equal(narrated.state, "incomplete");
+  assert.equal(narrated.reason, "narration");
+
+  // Guardrails: the heuristic must not fire without tool calls, on small
+  // prompts, or when a structured answer was produced.
+  assert.equal(
+    classifyOutcome({ exitCode: 0, parsed: { text: "ALLOW: no issues", stopReason: "stop" }, promptChars: bigPrompt }).state,
+    "completed"
+  );
+  assert.equal(
+    classifyOutcome({ exitCode: 0, parsed: narration, toolEventCount: 4, promptChars: 120 }).state,
+    "completed"
+  );
+  assert.equal(
+    classifyOutcome({
+      exitCode: 0,
+      parsed: { text: '{"verdict":"approve"}', stopReason: "stop" },
+      toolEventCount: 4,
+      promptChars: bigPrompt,
+      hasStructuredOutput: true
+    }).state,
+    "completed"
+  );
+});
+
+test("classifyOutcome honours OPENCODE_COMPANION_MIN_ANSWER_CHARS", () => {
+  const parsed = { text: "x".repeat(50), stopReason: "stop" };
+  const args = { exitCode: 0, parsed, toolEventCount: 2, promptChars: 5000 };
+  assert.equal(classifyOutcome({ ...args, minAnswerChars: 10 }).state, "completed");
+  assert.equal(classifyOutcome({ ...args, env: { OPENCODE_COMPANION_MIN_ANSWER_CHARS: "10" } }).state, "completed");
+  assert.equal(classifyOutcome({ ...args, env: { OPENCODE_COMPANION_MIN_ANSWER_CHARS: "400" } }).state, "incomplete");
 });
 
 test("extractStructuredJson handles bare, fenced, and prose-wrapped JSON", () => {

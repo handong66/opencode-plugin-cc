@@ -87,6 +87,53 @@ test("failed runs surface stderr and a non-zero exit", () => {
   assert.match(payload.stderrTail, /fake provider exploded/);
 });
 
+// P-COMPLETE: exit code 0 is not a verdict. Two recorded failure shapes —
+// "no final output" (2026-07-17) and one line of narration after tool calls
+// (2026-08-16) — must land on `incomplete`, never on `completed`.
+test("empty answers are reported as incomplete, not completed", () => {
+  const fake = makeFakeEnv({ mode: "empty-text" });
+  const cwd = makeTempGitRepo();
+
+  const result = runCompanion(["task", "--json", "--write", "summarise the contracts"], { env: fake.env, cwd });
+  assert.equal(result.status, 2, `incomplete runs must exit 2, got ${result.status}: ${result.stderr}`);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.outputState, "incomplete");
+  assert.equal(payload.outputStateReason, "empty-text");
+
+  const status = runCompanion(["status", "--json", "--all"], { env: fake.env, cwd });
+  const { jobs } = JSON.parse(status.stdout);
+  assert.equal(jobs[0].status, "incomplete");
+  assert.equal(jobs[0].outputState, "incomplete");
+
+  // The stored result must be reachable and must not read like an answer.
+  const stored = runCompanion(["result", jobs[0].id], { env: fake.env, cwd });
+  assert.match(stored.stdout, /stopped before producing a final answer/);
+  assert.doesNotMatch(stored.stdout, /\[opencode returned no final output\]/);
+  assert.match(stored.stdout, /Recover with: \/opencode:rescue --resume/);
+});
+
+test("narration after tool calls is incomplete and keeps the partial output plus stderr", () => {
+  const fake = makeFakeEnv({ mode: "narration" });
+  const cwd = makeTempGitRepo();
+  const prompt = `<task>\n${"Review the parent contracts in detail. ".repeat(60)}\n</task>`;
+
+  const result = runCompanion(["task", "--json", "--read-only", prompt], { env: fake.env, cwd });
+  assert.equal(result.status, 2, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.outputState, "incomplete");
+  assert.equal(payload.outputStateReason, "stop-reason");
+  assert.equal(payload.stopReason, "tool-calls");
+  assert.equal(payload.toolEventCount, 3);
+  assert.equal(payload.rawOutput, "Parent contracts read. Now the source files.");
+
+  const rendered = runCompanion(["result"], { env: fake.env, cwd }).stdout;
+  assert.match(rendered, /stopReason: tool-calls, 3 tool calls/);
+  assert.match(rendered, /Parent contracts read\. Now the source files\./);
+  assert.match(rendered, /external_directory/, "the auto-rejected path must be visible");
+  assert.match(rendered, /incomplete/);
+});
+
 test("silent runs (no events) are treated as failures", () => {
   const fake = makeFakeEnv({ mode: "silent" });
   const result = runCompanion(["task", "--json", "--write", "quiet"], { env: fake.env, cwd: makeTempGitRepo() });
