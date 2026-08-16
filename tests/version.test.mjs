@@ -30,11 +30,20 @@ test("package, plugin manifest and marketplace agree on one clean version", () =
   }
 });
 
-test("the changelog documents the released version", () => {
+// The section has to carry the release date as well as the number. A dateless
+// heading is indistinguishable from an in-progress one, and this is the file a
+// user reads to decide whether the version they have is the version described.
+test("the changelog documents the released version, with its date", () => {
   const pkg = readJson("package.json");
   const changelog = fs.readFileSync(path.join(REPO_ROOT, "plugins", "opencode", "CHANGELOG.md"), "utf8");
+  const heading = new RegExp(`\\n## ${pkg.version.replace(/\\./g, "\\\\.")} — (\\d{4}-\\d{2}-\\d{2})\\n`);
+  const match = changelog.match(heading);
   assert.ok(
-    changelog.includes(`\n## ${pkg.version}\n`),
-    `plugins/opencode/CHANGELOG.md needs a "## ${pkg.version}" section`
+    match,
+    `plugins/opencode/CHANGELOG.md needs a "## ${pkg.version} — YYYY-MM-DD" section`
+  );
+  assert.ok(
+    !Number.isNaN(Date.parse(match[1])),
+    `the release date in the ${pkg.version} heading must be a real date`
   );
 });
