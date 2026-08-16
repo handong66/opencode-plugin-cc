@@ -1511,7 +1511,9 @@ const SUBCOMMAND_HELP = {
     "                          or orphaned one — name those with --resume-session)",
     "  --resume-session <id>   continue exactly this opencode session, no heuristic",
     "  --timeout-ms <ms>       companion-side deadline for the run (default 900000)",
-    "  --                      everything after this is task text, never flags",
+    "  --                      before any task text: everything after it is task text,",
+    "                          never flags. Inside task text a standalone -- is just",
+    "                          part of the text.",
     ...EXECUTION_FLAG_NOTE,
     "",
     "Exit codes: 0 answer, 1 failed, 2 ran but produced no final answer."

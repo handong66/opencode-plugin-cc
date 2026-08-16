@@ -90,3 +90,26 @@ test("splitAtSentinel only splits on a standalone --", () => {
   });
   assert.equal(splitAtSentinel("--write --\nmulti\nline").literal, "multi\nline");
 });
+
+// The sentinel is a *leading* marker, the same way an unknown `--flag` only
+// counts before the free text starts. It used to be positional-blind, so a
+// standalone `--` inside ordinary prose was eaten: `run the suite -- then
+// report` reached opencode as `run the suite then report`, quietly rewriting
+// the instruction into a different one that still reads as English.
+test("a standalone -- inside task text stays task text", () => {
+  assert.deepEqual(splitAtSentinel("run the suite -- then report"), {
+    head: "run the suite -- then report",
+    literal: null
+  });
+  // Only flags (and their values) may precede the sentinel.
+  assert.equal(splitAtSentinel("--model a/b -- the prompt").literal, "the prompt");
+  assert.equal(splitAtSentinel("-- the prompt").literal, "the prompt");
+
+  const fake = makeFakeEnv();
+  const result = runCompanion(["task", "run the suite -- then report"], {
+    env: fake.env,
+    cwd: makeTempGitRepo()
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readRunArgs(fake).at(-1), "run the suite -- then report");
+});
