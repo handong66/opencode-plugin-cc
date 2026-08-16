@@ -38,7 +38,11 @@ function stderrBlock(stderrTail, lineCount) {
 }
 
 function footer(job) {
-  const lines = ["", "---", `Job: ${job.id} (${job.kind}, ${job.status}, ${fmtDuration(job.durationMs)})`];
+  const lines = [
+    "",
+    "---",
+    `Job: ${job.id} (${job.kind}, ${describeJobStatus(job)}, ${fmtDuration(job.durationMs)})`
+  ];
   if (job.opencodeSessionId) {
     lines.push(`opencode session: ${job.opencodeSessionId}`);
     lines.push(`Continue in opencode with: opencode -s ${job.opencodeSessionId}`);
@@ -85,6 +89,12 @@ export function renderIncompleteOutput(job, payload) {
 
 export function renderTaskFailure(job, payload) {
   const lines = [`opencode ${job.kind} run failed (exit code ${payload.exitCode ?? "unknown"}).`];
+  if (payload.timedOut) {
+    lines.push(
+      `The run was stopped by the companion after ${payload.timeoutMs}ms (--timeout-ms); opencode itself has no timeout flag.`,
+      "Re-run with a larger --timeout-ms, or narrow the task."
+    );
+  }
   if (payload.spawnError) {
     lines.push(`Spawn error: ${payload.spawnError}`);
   }

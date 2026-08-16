@@ -32,10 +32,10 @@ Execution mode rules:
   - `Run in background`
 
 Argument handling:
-- Preserve the user's arguments exactly.
-- Do not strip `--wait` or `--background` yourself.
+- Preserve the user's arguments exactly, except for the two execution flags.
+- `--wait` and `--background` are Claude Code execution flags. Use them to pick the flow above, then remove them from the string you pass to the companion; call what is left `COMPANION_ARGS`.
+- The companion always runs in the foreground and now **rejects** `--background` with a non-zero exit, so forwarding it fails the run outright. Claude Code's `Bash(..., run_in_background: true)` is what actually detaches it.
 - Do not add extra review instructions or rewrite the user's intent.
-- The companion script parses `--wait` and `--background`, but Claude Code's `Bash(..., run_in_background: true)` is what actually detaches the run.
 - `/opencode:review` does not support staged-only review, unstaged-only review, or extra focus text.
 - If the user needs custom review instructions or more adversarial framing, they should use `/opencode:adversarial-review`.
 
@@ -43,7 +43,7 @@ Foreground flow:
 - Run with a generous timeout (reviews can take several minutes):
 ```typescript
 Bash({
-  command: `node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" review "$ARGUMENTS"`,
+  command: `node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" review "COMPANION_ARGS"`,
   description: "opencode review",
   timeout: 600000
 })
@@ -56,7 +56,7 @@ Background flow:
 - Launch the review with `Bash` in the background:
 ```typescript
 Bash({
-  command: `node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" review "$ARGUMENTS"`,
+  command: `node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" review "COMPANION_ARGS"`,
   description: "opencode review",
   run_in_background: true
 })

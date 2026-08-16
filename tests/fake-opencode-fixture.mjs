@@ -3,7 +3,7 @@
 // test suite runs without a real opencode install, credentials, or model calls.
 // Behavior is steered by env vars:
 //   OPENCODE_FAKE_MODE       success (default) | review-json | fail | silent
-//                            | empty-text | narration
+//                            | empty-text | narration | hang
 //   OPENCODE_FAKE_TEXT       final answer text for success mode
 //   OPENCODE_FAKE_STDERR     written to stderr before the run still exits 0
 //   OPENCODE_FAKE_ARGS_FILE  when set, argv is dumped there as JSON
@@ -79,6 +79,16 @@ if (args[0] === "run") {
     process.exit(1);
   }
   if (mode === "silent") {
+    process.exit(0);
+  }
+  // `opencode run` has no timeout flag of its own, so a run that never returns
+  // can only be bounded by the companion. Emit one event first so the stream is
+  // parseable, then block until something kills the process group.
+  if (mode === "hang") {
+    process.stdout.write(
+      `${JSON.stringify({ type: "step_start", part: { id: "prt_step1", sessionID: "ses_fake0123456789" } })}\n`
+    );
+    await new Promise((resolve) => setTimeout(resolve, 120_000));
     process.exit(0);
   }
 

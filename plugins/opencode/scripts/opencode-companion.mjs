@@ -46,6 +46,11 @@ const SETUP_GUIDANCE =
   "Install the opencode CLI so the `opencode` binary is on PATH (e.g. `npm i -g opencode-ai` or `curl -fsSL https://opencode.ai/install | bash`), then sign in with `opencode auth login`. Run /opencode:setup to re-check.";
 const STATUS_WAIT_POLL_MS = 2000;
 const STATUS_WAIT_DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
+// A backstop, not a budget: opencode runs have a measured p90 of ~5.5 minutes,
+// so this only catches runs that are never coming back.
+const RUN_TIMEOUT_DEFAULT_MS = 15 * 60 * 1000;
+const BACKGROUND_FLAG_MESSAGE =
+  "--background is a Claude Code execution flag, not a companion flag; the companion always runs in the foreground. Detach with Bash(run_in_background: true), or use /opencode:rescue --background.";
 const JOB_ID_PREFIXES = {
   task: "task",
   review: "review",
@@ -86,7 +91,39 @@ function loadReviewSchema() {
   return JSON.parse(fs.readFileSync(REVIEW_SCHEMA_PATH, "utf8"));
 }
 
-async function executeJob({ kind, cwd, opencodeOptions, promptPreview, model = null, variant = null }) {
+// `--background` used to be consumed silently so it could not leak into the
+// prompt. That also meant a caller who passed it believed the run had been
+// detached while it was still on Claude Code's 2-minute Bash wall.
+function rejectsBackgroundFlag(flags) {
+  if (!flags.has("--background")) {
+    return false;
+  }
+  process.stderr.write(`${BACKGROUND_FLAG_MESSAGE}\n`);
+  process.exitCode = 1;
+  return true;
+}
+
+function resolveTimeoutMs(flags, defaultMs) {
+  const raw = flags.get("--timeout-ms");
+  if (raw === undefined) {
+    return { timeoutMs: defaultMs };
+  }
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    return { error: `--timeout-ms must be a positive number of milliseconds (got ${raw}).` };
+  }
+  return { timeoutMs: value };
+}
+
+async function executeJob({
+  kind,
+  cwd,
+  opencodeOptions,
+  promptPreview,
+  model = null,
+  variant = null,
+  timeoutMs = RUN_TIMEOUT_DEFAULT_MS
+}) {
   const jobId = generateJobId(JOB_ID_PREFIXES[kind] ?? "job");
   const logFile = resolveJobLogFile(cwd, jobId);
 
@@ -106,6 +143,7 @@ async function executeJob({ kind, cwd, opencodeOptions, promptPreview, model = n
   const outcome = await runOpencode(opencodeOptions, {
     cwd,
     logFile,
+    timeoutMs,
     onSpawn: (child) => upsertJob(cwd, { id: jobId, childPid: child.pid }),
     // Parsing a multi-hundred-KB event stream and rendering it takes real time,
     // and for all of it the child pid is already dead while this record still
@@ -142,6 +180,8 @@ async function executeJob({ kind, cwd, opencodeOptions, promptPreview, model = n
     exitCode: outcome.exitCode,
     spawnError: outcome.spawnError,
     stderrTail: outcome.stderrTail,
+    timedOut: Boolean(outcome.timedOut),
+    timeoutMs,
     durationMs: outcome.durationMs
   };
 
@@ -156,7 +196,7 @@ async function executeJob({ kind, cwd, opencodeOptions, promptPreview, model = n
     status: wasCancelled ? "cancelled" : ok ? "completed" : incomplete ? "incomplete" : "failed",
     // A real verdict clears any label reconciliation wrote while this run was
     // in flight; `upsertJob` merges, so omitting the key would keep it.
-    failureClass: null,
+    failureClass: !wasCancelled && !ok && !incomplete && payload.timedOut ? "timeout" : null,
     outputState: classification.state,
     outputStateReason: classification.reason,
     stopReason: payload.stopReason,
@@ -171,7 +211,9 @@ async function executeJob({ kind, cwd, opencodeOptions, promptPreview, model = n
           : firstLine(payload.rawOutput, 120)
         : incomplete
           ? `incomplete (${classification.reason}, stopReason ${payload.stopReason ?? "unknown"}): ${firstLine(payload.rawOutput, 80)}`
-          : `failed (exit ${outcome.exitCode ?? "?"})`
+          : payload.timedOut
+            ? `stopped by the companion after ${timeoutMs}ms (--timeout-ms)`
+            : `failed (exit ${outcome.exitCode ?? "?"})`
   };
 
   const fullJob = { ...findJob(cwd, jobId, { reconcile: false }), ...job };
@@ -199,12 +241,21 @@ function exitCodeForOutputState(outputState) {
 
 async function commandTask(tokens) {
   const { flags, rest, errors } = parseFlags(tokens, {
-    valueFlags: ["--model", "--variant", "--effort"],
+    valueFlags: ["--model", "--variant", "--effort", "--timeout-ms"],
     booleanFlags: ["--json", "--write", "--read-only", "--resume-last", "--wait", "--background"]
   });
   const asJson = flags.has("--json");
   if (errors.length > 0) {
     print(`Invalid arguments: ${errors.join("; ")}`);
+    process.exitCode = 1;
+    return;
+  }
+  if (rejectsBackgroundFlag(flags)) {
+    return;
+  }
+  const timeout = resolveTimeoutMs(flags, RUN_TIMEOUT_DEFAULT_MS);
+  if (timeout.error) {
+    print(timeout.error);
     process.exitCode = 1;
     return;
   }
@@ -240,6 +291,7 @@ async function commandTask(tokens) {
     cwd,
     model: flags.get("--model") ?? null,
     variant,
+    timeoutMs: timeout.timeoutMs,
     promptPreview: taskText,
     opencodeOptions: {
       prompt: taskText,
@@ -263,6 +315,7 @@ async function commandTask(tokens) {
       rawOutput: payload.rawOutput,
       opencodeSessionId: payload.opencodeSessionId,
       exitCode: payload.exitCode,
+      timedOut: payload.timedOut,
       stderrTail: ok ? undefined : payload.stderrTail
     });
   } else {
@@ -273,11 +326,20 @@ async function commandTask(tokens) {
 
 async function commandReview(tokens, { adversarial }) {
   const { flags, rest, errors } = parseFlags(tokens, {
-    valueFlags: ["--base", "--scope"],
+    valueFlags: ["--base", "--scope", "--timeout-ms"],
     booleanFlags: ["--json", "--wait", "--background"]
   });
   if (errors.length > 0) {
     print(`Invalid arguments: ${errors.join("; ")}`);
+    process.exitCode = 1;
+    return;
+  }
+  if (rejectsBackgroundFlag(flags)) {
+    return;
+  }
+  const timeout = resolveTimeoutMs(flags, RUN_TIMEOUT_DEFAULT_MS);
+  if (timeout.error) {
+    print(timeout.error);
     process.exitCode = 1;
     return;
   }
@@ -317,6 +379,7 @@ async function commandReview(tokens, { adversarial }) {
   const { ok, outputState, payload } = await executeJob({
     kind,
     cwd,
+    timeoutMs: timeout.timeoutMs,
     promptPreview: adversarial
       ? `adversarial review of ${reviewInput.label}${focus ? `: ${focus}` : ""}`
       : `review of ${reviewInput.label}`,
@@ -491,12 +554,36 @@ async function commandStatus(tokens) {
   }
 }
 
-function commandResult(tokens) {
-  const { flags, rest } = parseFlags(tokens, { booleanFlags: ["--json"] });
+async function commandResult(tokens) {
+  const { flags, rest } = parseFlags(tokens, {
+    valueFlags: ["--timeout-ms"],
+    booleanFlags: ["--json", "--wait"]
+  });
   const cwd = process.cwd();
-  const job = pickJob(cwd, rest[0] ?? null, (candidate) =>
-    ["completed", "failed", "incomplete"].includes(candidate.status)
+  const wantsWait = flags.has("--wait");
+  const timeout = resolveTimeoutMs(flags, STATUS_WAIT_DEFAULT_TIMEOUT_MS);
+  if (timeout.error) {
+    print(timeout.error);
+    process.exitCode = 1;
+    return;
+  }
+  // Without --wait only a finished job answers; with it, the newest job of any
+  // status does, because waiting for the running one is the whole point.
+  let job = pickJob(cwd, rest[0] ?? null, (candidate) =>
+    wantsWait
+      ? ["completed", "failed", "incomplete", "running", "queued"].includes(candidate.status)
+      : ["completed", "failed", "incomplete"].includes(candidate.status)
   );
+
+  if (job && wantsWait) {
+    // findJob reconciles, so a job whose process died reaches a terminal state
+    // and drops out of this loop instead of holding the caller to the deadline.
+    const deadline = Date.now() + timeout.timeoutMs;
+    while ((job.status === "running" || job.status === "queued") && Date.now() < deadline) {
+      await sleep(STATUS_WAIT_POLL_MS);
+      job = findJob(cwd, job.id) ?? job;
+    }
+  }
 
   if (!job) {
     print(
@@ -677,14 +764,21 @@ function commandHelp() {
       "",
       "Subcommands:",
       "  setup [--json] [--enable-review-gate|--disable-review-gate]",
-      "  task [--json] [--model <provider/model>] [--variant <v>] [--write|--read-only] [--resume-last] <task text>",
-      "  review [--base <ref>] [--scope auto|working-tree|branch]",
-      "  adversarial-review [--base <ref>] [--scope ...] [focus text]",
+      "  task [--json] [--model <provider/model>] [--variant <v>] [--write|--read-only] [--resume-last] [--timeout-ms <ms>] <task text>",
+      "  review [--base <ref>] [--scope auto|working-tree|branch] [--timeout-ms <ms>] [--json]",
+      "  adversarial-review [--base <ref>] [--scope ...] [--timeout-ms <ms>] [focus text]",
       "  status [job-id] [--all] [--wait] [--timeout-ms <ms>] [--json]",
-      "  result [job-id] [--json]",
+      "  result [job-id] [--wait] [--timeout-ms <ms>] [--json]",
       "  cancel [job-id]",
       "  task-resume-candidate [--json]",
-      "  transfer [--source <claude-jsonl>] [--model <provider/model>]"
+      "  transfer [--source <claude-jsonl>] [--model <provider/model>]",
+      "",
+      "--timeout-ms bounds one opencode run (task/review, default 900000) or one",
+      "wait loop (status/result, default 900000). `opencode run` has no timeout of",
+      "its own, so this is the only deadline a stuck run has.",
+      "--background and --wait are Claude Code execution flags, not companion flags:",
+      "the companion always runs in the foreground. Detach with",
+      "Bash(run_in_background: true), or use /opencode:rescue --background."
     ].join("\n")
   );
 }

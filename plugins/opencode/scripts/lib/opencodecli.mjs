@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 
+import { terminateProcessTree } from "./process.mjs";
+
 const STDERR_TAIL_CHARS = 4000;
 const ANSI_PATTERN = /\u001B\[[0-9;]*[A-Za-z]/g;
 
@@ -327,7 +329,12 @@ function describeEventLine(line) {
 
 // Runs one headless opencode turn. The child is detached into its own process
 // group so `cancel` and session teardown can terminate the whole tree.
-export function runOpencode(options, { cwd, logFile = null, onSpawn = null, onExit = null } = {}) {
+// `opencode run` has no timeout flag of its own (confirmed against
+// `opencode run --help`), so `timeoutMs` is the only deadline a stuck run has.
+export function runOpencode(
+  options,
+  { cwd, logFile = null, onSpawn = null, onExit = null, timeoutMs = null } = {}
+) {
   const args = buildOpencodeArgs(options);
   const startedAt = Date.now();
   const logStream = logFile ? fs.createWriteStream(logFile, { flags: "a" }) : null;
@@ -342,6 +349,22 @@ export function runOpencode(options, { cwd, logFile = null, onSpawn = null, onEx
     if (onSpawn) {
       onSpawn(child);
     }
+
+    let timedOut = false;
+    const deadline =
+      Number.isFinite(timeoutMs) && timeoutMs > 0
+        ? setTimeout(() => {
+            timedOut = true;
+            // Signals the whole group: the child is detached, so its own
+            // children would otherwise survive the kill.
+            terminateProcessTree(child.pid ?? Number.NaN);
+          }, timeoutMs)
+        : null;
+    const clearDeadline = () => {
+      if (deadline) {
+        clearTimeout(deadline);
+      }
+    };
 
     let stdout = "";
     let lineBuffer = "";
@@ -367,6 +390,7 @@ export function runOpencode(options, { cwd, logFile = null, onSpawn = null, onEx
     });
 
     child.on("error", (error) => {
+      clearDeadline();
       logStream?.end();
       resolve({
         exitCode: null,
@@ -374,11 +398,13 @@ export function runOpencode(options, { cwd, logFile = null, onSpawn = null, onEx
         parsed: null,
         stdout: "",
         stderrTail,
+        timedOut,
         durationMs: Date.now() - startedAt
       });
     });
 
     child.on("close", (code) => {
+      clearDeadline();
       logStream?.end();
       // Announced before parsing: from here on the pid is dead but the job
       // record is still `running`, and parsing a large stream is not instant.
@@ -399,11 +425,15 @@ export function runOpencode(options, { cwd, logFile = null, onSpawn = null, onEx
           }
         : null;
       resolve({
+        // A kill leaves `code === null` (signal), which classifies as failed. A
+        // child that still managed to exit 0 inside the kill window produced a
+        // real answer, and throwing it away would be worse than reporting it.
         exitCode: code,
         spawnError: null,
         parsed,
         stdout,
         stderrTail: stripAnsi(stderrTail),
+        timedOut,
         durationMs: Date.now() - startedAt
       });
     });
