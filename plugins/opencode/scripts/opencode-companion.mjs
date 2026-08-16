@@ -216,6 +216,7 @@ function handleTerminationSignal(signal) {
             id: run.jobId,
             status: "failed",
             failureClass: "interrupted",
+            resultComplete: false,
             childPid: null,
             durationMs,
             endedAt: new Date().toISOString(),
@@ -470,6 +471,10 @@ async function executeJob({
     failureClass,
     outputState: classification.state,
     outputStateReason: classification.reason,
+    // On the record as well as in the payload: a fan-in poller reading
+    // `status --all --json` must be able to tell a usable answer from a
+    // finished-but-empty one without a second call per job.
+    resultComplete,
     stopReason: payload.stopReason,
     opencodeSessionId: payload.opencodeSessionId,
     durationMs: outcome.durationMs,
@@ -879,6 +884,22 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// One `status --all --json` call should be enough to run a fan-in barrier over
+// several jobs, so it carries how long each has been going and whether its
+// answer is usable — the two things a scheduler otherwise re-derives per job.
+// A running job counts up from its creation; a finished one is frozen at its
+// recorded duration (a reconciled orphan freezes at its last sign of life).
+function withElapsed(job) {
+  const running = job.status === "running" || job.status === "queued";
+  const createdAt = Date.parse(job.startedAt ?? job.createdAt ?? "");
+  const elapsedMs = running
+    ? Number.isFinite(createdAt)
+      ? Date.now() - createdAt
+      : null
+    : (job.durationMs ?? null);
+  return { ...job, elapsedMs, resultComplete: job.resultComplete ?? null };
+}
+
 async function commandStatus(tokens) {
   const { flags, rest } = parseFlags(tokens, {
     valueFlags: ["--timeout-ms"],
@@ -913,7 +934,11 @@ async function commandStatus(tokens) {
     }
     const payload = readJobFile(cwd, jobId);
     if (flags.has("--json")) {
-      printJson({ job, hasResult: Boolean(payload) });
+      printJson({
+        job: withElapsed(job),
+        hasResult: Boolean(payload),
+        resultComplete: payload?.resultComplete ?? job.resultComplete ?? null
+      });
     } else {
       print(renderJobDetail(job, payload, readLogTail(job.logFile)));
     }
@@ -926,7 +951,12 @@ async function commandStatus(tokens) {
   );
   if (flags.has("--json")) {
     const location = resolveStateLocation(cwd);
-    printJson({ jobs, stateDir: location.dir, stateSource: location.source, workspaceRoot: location.workspaceRoot });
+    printJson({
+      jobs: jobs.map(withElapsed),
+      stateDir: location.dir,
+      stateSource: location.source,
+      workspaceRoot: location.workspaceRoot
+    });
   } else {
     print(renderJobList(jobs, { gateEnabled: Boolean(getConfig(cwd).stopReviewGate) }));
   }
