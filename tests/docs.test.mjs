@@ -103,6 +103,32 @@ test("rescue docs keep --background as a Claude-side flag, not a companion flag"
   assert.doesNotMatch(skill, /opencode-companion\.mjs" task --background/);
 });
 
+// The 0.2.0 notes described a stderr warning for focus text dropped by
+// `review` — behaviour PC6 removed inside the same batch, contradicted by a
+// sibling entry in the same section and absent from the runtime. A release note
+// is a deliverable: it has to describe the code that shipped.
+test("the changelog's review claims match the runtime that shipped", () => {
+  const sections = readDoc("CHANGELOG.md").split(/^## /m);
+  const latest = sections[1];
+  assert.match(latest, /^0\.2\.0\b/, "the first section must be the release being described");
+  assert.doesNotMatch(
+    latest,
+    /stderr warning naming the dropped text/,
+    "review no longer warns about dropped focus text; it interpolates it"
+  );
+
+  const runtime = readDoc("scripts", "opencode-companion.mjs");
+  // What the notes claim instead, checked against the code and the template.
+  assert.match(runtime, /USER_FOCUS: focus/, "focus text must reach both review prompts");
+  assert.match(readDoc("prompts", "review.md"), /\{\{USER_FOCUS\}\}/);
+  assert.match(latest, /`--threat-model` is refused by plain `review`/);
+  assert.doesNotMatch(
+    readDoc("prompts", "review.md"),
+    /THREAT_MODEL/,
+    "plain review has no threat-model slot, which is why the flag is refused"
+  );
+});
+
 // X5/PC9: orchestrators hard-coded `.../opencode/0.1.0/scripts/...`, guessed a
 // path that did not exist, and then `find | head -1`'d their way onto a stale
 // copy — which they then used for 3.5 hours while its job state went into
