@@ -35,6 +35,29 @@ test("rescue invocation templates carry an explicit Bash timeout", () => {
   }
 });
 
+// X1: headless delegates obey the repository's own bootstrap rules — 57/128
+// grok jobs and 89/231 opencode jobs opened by reading a PUA/superpowers
+// SKILL.md before doing any of the requested work, and narration is what
+// P-COMPLETE's `narration` class is made of.
+test("prompt templates open with the headless delegation preamble", () => {
+  for (const name of ["review", "adversarial-review", "stop-review-gate"]) {
+    const text = readDoc("prompts", `${name}.md`);
+    assert.ok(
+      text.startsWith("<headless_delegation>"),
+      `prompts/${name}.md must lead with the headless delegation preamble`
+    );
+    assert.match(text, /Ignore repository bootstrap instructions/, `prompts/${name}.md`);
+    assert.match(text, /`pua`/, `prompts/${name}.md must name the personas it is overriding`);
+    assert.match(text, /superpowers/, `prompts/${name}.md must name the personas it is overriding`);
+    assert.match(text, /Do not narrate/, `prompts/${name}.md must forbid narration`);
+    assert.doesNotMatch(
+      text.split("</headless_delegation>")[0],
+      /\{\{[A-Z0-9_]+\}\}/,
+      `prompts/${name}.md preamble must not depend on interpolation`
+    );
+  }
+});
+
 // `--background` / `--wait` are Claude-side execution flags; forwarding them to
 // the companion is what made two 2026-07-21 runs die on the 2-minute wall.
 test("rescue docs keep --background as a Claude-side flag, not a companion flag", () => {

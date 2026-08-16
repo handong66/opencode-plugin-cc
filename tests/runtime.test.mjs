@@ -79,6 +79,7 @@ test("review parses structured findings and stays read-only", () => {
   const prompt = runArgs.at(-1);
   assert.match(prompt, /<output_schema>/);
   assert.match(prompt, /<system_rules>/);
+  assert.match(prompt, /<headless_delegation>/, "the composed prompt must carry the headless preamble");
   assert.match(prompt, /app\.mjs/, "review prompt should inline the untracked file");
 });
 
