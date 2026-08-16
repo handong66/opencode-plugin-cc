@@ -15,6 +15,8 @@ import {
   detectPermissionWarnings,
   getOpencodeAvailability,
   parseEventStream,
+  readOpencodeModelConfig,
+  resolveRunSelection,
   runOpencode
 } from "./lib/opencodecli.mjs";
 import { terminateProcessTree } from "./lib/process.mjs";
@@ -292,14 +294,26 @@ async function executeJob({
   const jobId = generateJobId(JOB_ID_PREFIXES[kind] ?? "job");
   const logFile = resolveJobLogFile(cwd, jobId);
 
+  // Recorded before the run, from the same inputs `buildOpencodeArgs` uses, so
+  // "which model actually reviewed this" is answerable from the job record
+  // rather than from the caller's memory of what they did not pass.
+  const selection = resolveRunSelection({
+    model,
+    variant,
+    readOnly: opencodeOptions.readOnly === true
+  });
+
   upsertJob(cwd, {
     id: jobId,
     kind,
     status: "running",
     cwd,
     sessionId: claudeSessionId(),
-    model,
-    variant,
+    model: selection.model,
+    requestedModel: model,
+    modelSource: selection.source,
+    agent: selection.agent,
+    variant: selection.variant,
     promptPreview: firstLine(promptPreview, 160),
     logFile,
     startedAt: new Date().toISOString()
@@ -366,7 +380,7 @@ async function executeJob({
   }
   // Typed, actionable warnings derived from what opencode said on stderr while
   // still exiting 0 — chiefly an auto-rejected read of a path outside the repo.
-  const warnings = detectPermissionWarnings(outcome.stderrTail, { cwd });
+  const warnings = [...selection.warnings, ...detectPermissionWarnings(outcome.stderrTail, { cwd })];
   // X1: a headless delegate that opens by loading an interactive skill spends
   // turns and wall time on it before any of the requested work happens. The
   // prompt preamble forbids it; this makes a preamble that did not take visible.
@@ -405,6 +419,10 @@ async function executeJob({
   }
   const payload = {
     kind,
+    model: selection.model,
+    agent: selection.agent,
+    variant: selection.variant,
+    modelSource: selection.source,
     rawOutput: parsed.text ?? "",
     structuredOutput: parsed.structuredOutput ?? null,
     structuredOutputErrors: parsed.structuredOutputErrors ?? [],
@@ -764,24 +782,6 @@ async function commandReview(tokens, { adversarial }) {
   process.exitCode = exitCodeForOutputState(outputState);
 }
 
-function readDefaultModelFromConfig() {
-  const candidates = [
-    path.join(os.homedir(), ".config", "opencode", "opencode.json"),
-    path.join(os.homedir(), ".config", "opencode", "opencode.jsonc")
-  ];
-  for (const file of candidates) {
-    try {
-      const match = fs.readFileSync(file, "utf8").match(/"model"\s*:\s*"([^"]+)"/);
-      if (match) {
-        return match[1];
-      }
-    } catch {
-      continue;
-    }
-  }
-  return null;
-}
-
 function commandSetup(tokens) {
   const { flags } = parseFlags(tokens, {
     booleanFlags: ["--json", "--enable-review-gate", "--disable-review-gate"]
@@ -797,7 +797,14 @@ function commandSetup(tokens) {
 
   const availability = getOpencodeAvailability();
   const gateEnabled = Boolean(getConfig(cwd).stopReviewGate);
-  const defaultModel = availability.available ? readDefaultModelFromConfig() : null;
+  const modelConfig = availability.available
+    ? readOpencodeModelConfig()
+    : { model: null, agentModels: { plan: null, build: null } };
+  const defaultModel = modelConfig.model;
+  // The plugin's own read-only runs go through the `plan` agent, so this is the
+  // model that will actually review the user's work — and it is a different one
+  // whenever the config sets `agent.plan.model`.
+  const readOnlyModel = modelConfig.agentModels.plan ?? defaultModel;
   const report = {
     ok: availability.available && availability.usable,
     opencodeAvailable: availability.available,
@@ -806,6 +813,8 @@ function commandSetup(tokens) {
     usable: Boolean(availability.usable),
     version: availability.version ?? null,
     defaultModel,
+    readOnlyModel,
+    readOnlyAgent: "plan",
     stopReviewGate: gateEnabled,
     nodeVersion: process.version,
     stateDir: resolveStateDir(cwd),
@@ -833,6 +842,11 @@ function commandSetup(tokens) {
       availability.authenticated
         ? `Authentication: ${availability.credentialCount} provider credential(s)${defaultModel ? ` (default model ${defaultModel})` : ""}`
         : "Authentication: no stored credentials. Run `!opencode auth login` (free opencode zen models may still work)."
+    );
+  }
+  if (availability.available && readOnlyModel && readOnlyModel !== defaultModel) {
+    lines.push(
+      `Read-only runs (review, adversarial-review, and task without --write) use the plan agent, so they run on ${readOnlyModel}, not ${defaultModel ?? "the default"}.`
     );
   }
   lines.push(`Node: ${process.version}`);

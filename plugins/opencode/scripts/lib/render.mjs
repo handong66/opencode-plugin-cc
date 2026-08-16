@@ -49,12 +49,30 @@ function warningBlock(warnings) {
   return ["", "Warnings:", ...entries.map((warning) => `- ${warning.message}`)];
 }
 
+// Which model produced this. Every recorded job stored `model: null` and no
+// renderer showed the agent, so read-only runs silently landing on the plan
+// agent's model — a different, cheaper model than the configured default —
+// could not be seen by anyone relying on those reviews.
+export function describeRunSelection(job) {
+  if (!job?.model && !job?.agent) {
+    return null;
+  }
+  const qualifiers = [job.agent ? `agent ${job.agent}` : null, job.variant ? `variant ${job.variant}` : null]
+    .filter(Boolean)
+    .join(", ");
+  return `Model: ${job.model ?? "opencode default"}${qualifiers ? ` (${qualifiers})` : ""}`;
+}
+
 function footer(job) {
   const lines = [
     "",
     "---",
     `Job: ${job.id} (${job.kind}, ${describeJobStatus(job)}, ${fmtDuration(job.durationMs)})`
   ];
+  const selection = describeRunSelection(job);
+  if (selection) {
+    lines.push(selection);
+  }
   if (job.opencodeSessionId) {
     lines.push(`opencode session: ${job.opencodeSessionId}`);
     lines.push(`Continue in opencode with: opencode -s ${job.opencodeSessionId}`);
@@ -239,8 +257,9 @@ export function renderJobDetail(job, payload, logTail) {
     `Updated: ${job.updatedAt}`,
     `Duration: ${fmtDuration(job.durationMs)}`
   ];
-  if (job.model) {
-    lines.push(`Model: ${job.model}`);
+  const selection = describeRunSelection(job);
+  if (selection) {
+    lines.push(selection);
   }
   if (payload?.outputState || job.outputState) {
     lines.push(`Output state: ${payload?.outputState ?? job.outputState}`);

@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
 import { terminateProcessTree } from "./process.mjs";
@@ -195,6 +197,78 @@ export function detectPermissionWarnings(stderrTail, { cwd = null } = {}) {
     });
   }
   return warnings;
+}
+
+// opencode's config is JSONC. The previous reader took the *first*
+// `"model": "..."` match in the file, which in a config that sets per-agent
+// models is whichever one happens to be written first — so the reported
+// "default model" could belong to an agent nobody selected.
+export function parseJsonc(text) {
+  const withoutComments = String(text ?? "")
+    // Strings first, so a `//` or `/*` inside one is not mistaken for a comment.
+    .replace(/"(?:[^"\\]|\\.)*"|\/\*[\s\S]*?\*\/|\/\/[^\n\r]*/g, (match) =>
+      match.startsWith('"') ? match : " "
+    );
+  const withoutTrailingCommas = withoutComments.replace(/,(\s*[}\]])/g, "$1");
+  return JSON.parse(withoutTrailingCommas);
+}
+
+export function readOpencodeModelConfig({ homeDir = os.homedir() } = {}) {
+  const candidates = [
+    path.join(homeDir, ".config", "opencode", "opencode.json"),
+    path.join(homeDir, ".config", "opencode", "opencode.jsonc")
+  ];
+  for (const file of candidates) {
+    let config;
+    try {
+      config = parseJsonc(fs.readFileSync(file, "utf8"));
+    } catch {
+      continue;
+    }
+    if (!config || typeof config !== "object") {
+      continue;
+    }
+    const agents = config.agent ?? config.agents ?? {};
+    return {
+      file,
+      model: typeof config.model === "string" ? config.model : null,
+      agentModels: {
+        plan: typeof agents.plan?.model === "string" ? agents.plan.model : null,
+        build: typeof agents.build?.model === "string" ? agents.build.model : null
+      },
+      agentVariants: {
+        plan: typeof agents.plan?.variant === "string" ? agents.plan.variant : null,
+        build: typeof agents.build?.variant === "string" ? agents.build.variant : null
+      }
+    };
+  }
+  return { file: null, model: null, agentModels: { plan: null, build: null }, agentVariants: { plan: null, build: null } };
+}
+
+// What this run will actually use, decided before it starts. Every recorded
+// job in the corpus stored `model: null`, and nothing rendered the agent — so
+// the fact that read-only runs land on whatever `agent.plan.model` says (a
+// flash-tier model in the observed config) was invisible to the person using
+// those reviews as an implementation gate.
+export function resolveRunSelection({ model = null, variant = null, readOnly = false, config = null } = {}) {
+  const resolved = config ?? readOpencodeModelConfig();
+  const agent = readOnly ? "plan" : "build";
+  const agentModel = resolved.agentModels?.[agent] ?? null;
+  const agentVariant = resolved.agentVariants?.[agent] ?? null;
+  const effectiveModel = model ?? agentModel ?? resolved.model ?? null;
+  const effectiveVariant = variant ?? agentVariant ?? null;
+  const source = model ? "flag" : agentModel ? `config:agent.${agent}.model` : resolved.model ? "config:model" : "opencode-default";
+
+  const warnings = [];
+  // The read-only path is chosen by this plugin, not by the caller, so a model
+  // that comes with it is a side effect of an agent name.
+  if (!model && agentModel && resolved.model && agentModel !== resolved.model) {
+    warnings.push({
+      class: "read_only_model_override",
+      message: `read_only_model_override: this run uses the \`${agent}\` agent, so its model is ${agentModel} (from ${resolved.file}), not your default ${resolved.model}. Pass --model explicitly if the agent's model is not the one you want reviewing your work.`
+    });
+  }
+  return { model: effectiveModel, agent, variant: effectiveVariant, source, warnings };
 }
 
 export function getOpencodeAvailability() {
