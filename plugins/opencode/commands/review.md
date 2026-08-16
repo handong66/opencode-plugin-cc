@@ -1,6 +1,6 @@
 ---
 description: Run an opencode code review against local git state
-argument-hint: '[--wait|--background] [--base <ref>] [--scope auto|working-tree|branch]'
+argument-hint: '[--wait|--background] [--base <ref|A..B>] [--head <ref>] [--paths <globs>] [--scope auto|working-tree|branch] [--rubric-file <path>] [focus ...]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), AskUserQuestion
 ---
@@ -36,8 +36,12 @@ Argument handling:
 - `--wait` and `--background` are Claude Code execution flags. Use them to pick the flow above, then remove them from the string you pass to the companion; call what is left `COMPANION_ARGS`.
 - The companion always runs in the foreground and now **rejects** `--background` with a non-zero exit, so forwarding it fails the run outright. Claude Code's `Bash(..., run_in_background: true)` is what actually detaches it.
 - Do not add extra review instructions or rewrite the user's intent.
-- `/opencode:review` does not support staged-only review, unstaged-only review, or extra focus text.
-- If the user needs custom review instructions or more adversarial framing, they should use `/opencode:adversarial-review`.
+- Target selection: `--base <ref>` reviews `<ref>...HEAD`; `--base A..B` and `--base A...B` are accepted as written; `--head <ref>` moves the other end; `--paths <glob,...>` (alias `--files`) limits the review to those pathspecs. Preserve whichever the user gave.
+- Free text is now a focus instruction for the reviewer, not an error. Pass it through unchanged.
+- `--rubric-file <path>` supplies the user's own severity vocabulary (blocker/major/nit, P0/P1, …). The JSON output shape does not change; the reviewer maps their terms onto it.
+- `/opencode:review` still does not support staged-only or unstaged-only review; `--scope` accepts only `auto`, `working-tree` and `branch`, and anything else is rejected with the list.
+- If the user wants the change challenged rather than checked, `/opencode:adversarial-review` is the stronger framing (and it takes `--threat-model`).
+- If the helper prints a `review_input_truncated` warning, relay it: the reviewer did not see the whole diff, so "no findings" covers only the part it read.
 
 Foreground flow:
 - Run with a generous timeout (reviews can take several minutes):

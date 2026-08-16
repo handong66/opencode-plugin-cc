@@ -1,6 +1,6 @@
 ---
 description: Run an opencode review that challenges the implementation approach and design choices
-argument-hint: '[--wait|--background] [--base <ref>] [--scope auto|working-tree|branch] [--threat-model "<boundary>"] [focus ...]'
+argument-hint: '[--wait|--background] [--base <ref|A..B>] [--head <ref>] [--paths <globs>] [--scope auto|working-tree|branch] [--threat-model "<boundary>"] [--rubric-file <path>] [focus ...]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), AskUserQuestion
 ---

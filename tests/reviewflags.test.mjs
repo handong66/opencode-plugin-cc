@@ -42,7 +42,7 @@ test("review forwards --model and --variant instead of dropping them", () => {
   assert.equal(args[args.indexOf("--variant") + 1], "max");
 });
 
-test("an unknown review flag is refused, and stray review text is not swallowed", () => {
+test("an unknown review flag is refused, and focus text reaches the reviewer", () => {
   const fake = makeFakeEnv({ mode: "review-json" });
   const cwd = makeTempGitRepo();
 
@@ -52,12 +52,12 @@ test("an unknown review flag is refused, and stray review text is not swallowed"
   assert.match(unknown.stdout, /--scope/, "the error must list what review does accept");
   assert.equal(fs.existsSync(fake.argsFile), false);
 
-  // Non-adversarial review has nowhere to put focus text; dropping it silently
-  // is how a caller believes their instructions reached the reviewer.
-  const stray = runCompanion(["review", "focus", "on", "the", "lock"], { env: fake.env, cwd });
-  assert.equal(stray.status, 0, stray.stdout + stray.stderr);
-  assert.match(stray.stderr, /focus on the lock/);
-  assert.match(stray.stderr, /adversarial-review/);
+  // Free text used to be dropped without a word by non-adversarial `review`
+  // (PC6 gave it a slot instead of a warning), so a caller believed their
+  // instructions had reached the reviewer when they had not.
+  const focused = runCompanion(["review", "focus", "on", "the", "lock"], { env: fake.env, cwd });
+  assert.equal(focused.status, 0, focused.stdout + focused.stderr);
+  assert.match(readRunArgs(fake).at(-1), /User focus: focus on the lock/);
 });
 
 test("adversarial review still passes its focus text through", () => {

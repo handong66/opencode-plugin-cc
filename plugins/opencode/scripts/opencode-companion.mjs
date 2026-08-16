@@ -349,7 +349,8 @@ async function executeJob({
   model = null,
   variant = null,
   timeoutMs = RUN_TIMEOUT_DEFAULT_MS,
-  asJson = false
+  asJson = false,
+  extraWarnings = []
 }) {
   warnAboutStateLocation(cwd);
   const jobId = generateJobId(JOB_ID_PREFIXES[kind] ?? "job");
@@ -441,7 +442,11 @@ async function executeJob({
   }
   // Typed, actionable warnings derived from what opencode said on stderr while
   // still exiting 0 — chiefly an auto-rejected read of a path outside the repo.
-  const warnings = [...selection.warnings, ...detectPermissionWarnings(outcome.stderrTail, { cwd })];
+  const warnings = [
+    ...extraWarnings,
+    ...selection.warnings,
+    ...detectPermissionWarnings(outcome.stderrTail, { cwd })
+  ];
   // X1: a headless delegate that opens by loading an interactive skill spends
   // turns and wall time on it before any of the requested work happens. The
   // prompt preamble forbids it; this makes a preamble that did not take visible.
@@ -729,11 +734,22 @@ const REVIEW_SCOPES = ["auto", "working-tree", "branch"];
 const DEFAULT_THREAT_MODEL =
   "No threat model was supplied by the caller. Unless the repository itself says otherwise, assume a single-user local application with no network exposure and no untrusted input.";
 const REVIEW_FLAG_SUMMARY =
-  "Supported: --base <ref>, --scope auto|working-tree|branch, --model <provider/model>, --variant <level>, --timeout-ms <ms>, --json.";
+  "Supported: --base <ref|A..B|A...B>, --head <ref>, --scope auto|working-tree|branch, --paths <glob,...>, --files <path,...>, --rubric-file <path>, --model <provider/model>, --variant <level>, --timeout-ms <ms>, --json.";
 
 async function commandReview(tokens, { adversarial }) {
   const { flags, rest, errors, unknownFlags } = parseFlags(tokens, {
-    valueFlags: ["--base", "--scope", "--model", "--variant", "--timeout-ms", "--threat-model"],
+    valueFlags: [
+      "--base",
+      "--head",
+      "--scope",
+      "--paths",
+      "--files",
+      "--rubric-file",
+      "--model",
+      "--variant",
+      "--timeout-ms",
+      "--threat-model"
+    ],
     booleanFlags: ["--json", "--wait", "--background"]
   });
   if (errors.length > 0) {
@@ -775,11 +791,34 @@ async function commandReview(tokens, { adversarial }) {
   }
 
   const cwd = process.cwd();
+  // `--paths a,b` and `--paths 'src/**'` are both common; so is repeating the
+  // idea as `--files`. They mean the same thing to git.
+  const paths = [flags.get("--paths"), flags.get("--files")]
+    .filter(Boolean)
+    .flatMap((value) => value.split(","))
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+  let rubric = null;
+  if (flags.get("--rubric-file")) {
+    try {
+      rubric = fs.readFileSync(path.resolve(flags.get("--rubric-file")), "utf8").trim();
+    } catch (error) {
+      print(
+        `Could not read --rubric-file ${flags.get("--rubric-file")}: ${error instanceof Error ? error.message : error}`
+      );
+      process.exitCode = 1;
+      return;
+    }
+  }
+
   let reviewInput;
   try {
     reviewInput = collectReviewInput(cwd, {
       base: flags.get("--base") ?? null,
-      scope
+      head: flags.get("--head") ?? null,
+      scope,
+      paths
     });
   } catch (error) {
     print(error instanceof Error ? error.message : String(error));
@@ -792,15 +831,10 @@ async function commandReview(tokens, { adversarial }) {
     return;
   }
 
-  const strayText = rest.join(" ").trim();
-  const focus = adversarial ? strayText : "";
-  // `review` has no slot for focus text and used to drop it without a word, so
-  // the caller believed their instructions had reached the reviewer.
-  if (!adversarial && strayText) {
-    process.stderr.write(
-      `warning: /opencode:review does not take focus text, so "${firstLine(strayText, 80)}" was not sent to the reviewer. Use /opencode:adversarial-review for a review with extra focus.\n`
-    );
-  }
+  // Focus text now reaches both reviewers. `review` used to drop it silently,
+  // which is one of the reasons callers rebuilt reviews in their own prompts
+  // instead of using this command.
+  const focus = rest.join(" ").trim();
   const templateName = adversarial ? "adversarial-review" : "review";
   const template = loadPromptTemplate(ROOT_DIR, templateName);
   const threatModel = flags.get("--threat-model");
@@ -808,6 +842,9 @@ async function commandReview(tokens, { adversarial }) {
     TARGET_LABEL: reviewInput.label,
     REVIEW_INPUT: reviewInput.input,
     USER_FOCUS: focus || "(none provided)",
+    SEVERITY_RUBRIC: rubric
+      ? `The caller supplied this severity vocabulary. Map their terms onto the schema's \`critical|high|medium|low\` enum — the JSON shape does not change — and use their definitions when deciding how severe a finding is:\n${rubric}`
+      : "No custom severity vocabulary was supplied; use the schema's own critical/high/medium/low definitions.",
     THREAT_MODEL: threatModel
       ? `The caller states the boundary of this system as: ${threatModel}`
       : DEFAULT_THREAT_MODEL
@@ -816,11 +853,22 @@ async function commandReview(tokens, { adversarial }) {
   const kind = adversarial ? "adversarial-review" : "review";
   const model = flags.get("--model") ?? null;
   const variant = flags.get("--variant") ?? null;
+  // Truncation existed only as a sentence buried in the prompt, where the
+  // caller could not see it and the reviewer decided whether to mention it.
+  const extraWarnings = reviewInput.truncated
+    ? [
+        {
+          class: "review_input_truncated",
+          message: `review_input_truncated: the diff for ${reviewInput.label} is ${reviewInput.totalChars} characters and was cut to ${reviewInput.truncatedAtChars} before being sent. The reviewer did not see the rest — narrow the target with --paths/--files or a smaller range before trusting a verdict of "no findings".`
+        }
+      ]
+    : [];
   const { ok, outputState, payload } = await executeJob({
     kind,
     cwd,
     model,
     variant,
+    extraWarnings,
     timeoutMs: timeout.timeoutMs,
     asJson,
     promptPreview: adversarial
@@ -1299,9 +1347,12 @@ const SUBCOMMAND_HELP = {
     "Exit codes: 0 answer, 1 failed, 2 ran but produced no final answer."
   ],
   review: [
-    "usage: opencode-companion review [flags]",
+    "usage: opencode-companion review [flags] [focus text]",
     "",
-    "  --base <ref>            review <ref>...HEAD instead of the working tree",
+    "  --base <ref|A..B|A...B>  review a commit range instead of the working tree",
+    "  --head <ref>            the other end of the range (default HEAD)",
+    "  --paths <glob,...>      limit the review to these pathspecs (--files is an alias)",
+    "  --rubric-file <path>    severity vocabulary to judge by (the JSON schema is unchanged)",
     "  --scope auto|working-tree|branch   (staged-only / unstaged-only are rejected)",
     "  --model <provider/model>  override the model (leave unset to use opencode's default)",
     "  --variant <level>       reasoning variant",
@@ -1309,12 +1360,15 @@ const SUBCOMMAND_HELP = {
     "  --timeout-ms <ms>       companion-side deadline for the run (default 900000)",
     ...EXECUTION_FLAG_NOTE,
     "",
-    "review takes no focus text; use adversarial-review for that."
+    "Any remaining text is passed to the reviewer as extra focus."
   ],
   "adversarial-review": [
     "usage: opencode-companion adversarial-review [flags] [focus text]",
     "",
-    "  --base <ref>            review <ref>...HEAD instead of the working tree",
+    "  --base <ref|A..B|A...B>  review a commit range instead of the working tree",
+    "  --head <ref>            the other end of the range (default HEAD)",
+    "  --paths <glob,...>      limit the review to these pathspecs (--files is an alias)",
+    "  --rubric-file <path>    severity vocabulary to judge by (the JSON schema is unchanged)",
     "  --scope auto|working-tree|branch   (staged-only / unstaged-only are rejected)",
     "  --model <provider/model>  override the model (leave unset to use opencode's default)",
     "  --variant <level>       reasoning variant",
@@ -1390,8 +1444,8 @@ function commandHelp(subcommand = null) {
       "Subcommands (run `<subcommand> --help` for its flags):",
       "  setup [--json] [--enable-review-gate|--disable-review-gate]",
       "  task [--json] [--model <provider/model>] [--variant <v>] [--write|--read-only] [--resume-last|--resume-session <id>] [--timeout-ms <ms>] <task text>",
-      "  review [--base <ref>] [--scope auto|working-tree|branch] [--model <m>] [--variant <v>] [--timeout-ms <ms>] [--json]",
-      "  adversarial-review [--base <ref>] [--scope ...] [--model <m>] [--timeout-ms <ms>] [focus text]",
+      "  review [--base <ref|A..B>] [--head <ref>] [--paths <globs>] [--scope ...] [--model <m>] [--json] [focus text]",
+      "  adversarial-review [--base <ref|A..B>] [--head <ref>] [--paths <globs>] [--threat-model <text>] [focus text]",
       "  status [job-id] [--all] [--wait] [--timeout-ms <ms>] [--json]",
       "  result [job-id] [--wait] [--timeout-ms <ms>] [--json|--structured-only]",
       "  cancel [job-id]",

@@ -48,6 +48,10 @@ Question the chosen design, its tradeoffs, and whether a simpler or safer approa
 If the user supplied a focus area, weight it heavily, but still report any other material issue you can defend.
 </review_method>
 
+<severity_rubric>
+{{SEVERITY_RUBRIC}}
+</severity_rubric>
+
 <finding_bar>
 Report only material findings.
 Do not include style feedback, naming feedback, low-value cleanup, or speculative concerns without evidence.

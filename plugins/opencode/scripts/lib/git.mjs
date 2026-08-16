@@ -53,8 +53,8 @@ function section(title, body) {
   return `## ${title}\n\n${trimmed}\n`;
 }
 
-function collectUntracked(cwd) {
-  const raw = tryGit(cwd, ["ls-files", "--others", "--exclude-standard"]);
+function collectUntracked(cwd, paths = []) {
+  const raw = tryGit(cwd, ["ls-files", "--others", "--exclude-standard", ...(paths.length > 0 ? ["--", ...paths] : [])]);
   const files = raw.split("\n").filter(Boolean);
   if (files.length === 0) {
     return { list: "", contents: "", count: 0 };
@@ -91,40 +91,78 @@ function collectUntracked(cwd) {
   };
 }
 
+// Real review requests are commit ranges and file sets — `git diff A..B`,
+// `git diff 4e590f7..HEAD`, "the documents under docs/, committed". The old
+// selector could only express "working tree" or "<base>...HEAD", so every
+// caller rebuilt the review by hand and the command itself went unused.
+export function parseRange(spec) {
+  const text = String(spec ?? "").trim();
+  const threeDot = text.includes("...");
+  const separator = threeDot ? "..." : text.includes("..") ? ".." : null;
+  if (!separator) {
+    return null;
+  }
+  const [left, right] = text.split(separator);
+  return {
+    base: left.trim() || "HEAD",
+    head: right.trim() || "HEAD",
+    // `A..B` is "commits on B not on A"; `A...B` is the merge-base form, which
+    // is what a branch review wants. Whichever the caller wrote is honoured.
+    symmetric: threeDot
+  };
+}
+
 // Builds the inline repository context fed to the review prompt. opencode also
 // gets read access to the checkout, but the diff travels in the prompt so the
 // review works even when tool use is restricted.
-export function collectReviewInput(cwd, { base = null, scope = "auto" } = {}) {
+export function collectReviewInput(cwd, { base = null, head = null, scope = "auto", paths = [] } = {}) {
   if (!isGitRepository(cwd)) {
     throw new Error("Not a git repository. Run the review from inside a git checkout.");
   }
 
+  // `--base A..B` / `--base A...B` is accepted because that is how the request
+  // arrives in practice, and because typing it into `--base` alone otherwise
+  // produces "Base ref not found: A..B".
+  const range = parseRange(base);
+  let symmetric = true;
+  if (range) {
+    base = range.base;
+    head = head ?? range.head;
+    symmetric = range.symmetric;
+  }
+  const headRef = head ?? "HEAD";
+  const pathspec = paths.length > 0 ? ["--", ...paths] : [];
+  const pathLabel = paths.length > 0 ? ` limited to ${paths.join(", ")}` : "";
+
   const useBranch = Boolean(base) || scope === "branch";
   if (scope === "branch" && !base) {
-    throw new Error("--scope branch requires --base <ref>.");
+    throw new Error("--scope branch requires --base <ref> (or a range such as --base main..HEAD).");
   }
 
   let label;
   let body;
   if (useBranch) {
-    if (!refExists(cwd, base)) {
-      throw new Error(`Base ref not found: ${base}`);
+    for (const ref of [base, headRef]) {
+      if (!refExists(cwd, ref)) {
+        throw new Error(`Ref not found: ${ref}`);
+      }
     }
-    label = `branch diff against ${base}`;
-    const log = tryGit(cwd, ["log", "--oneline", `${base}..HEAD`]);
-    const diff = tryGit(cwd, ["diff", `${base}...HEAD`]);
+    const diffSpec = `${base}${symmetric ? "..." : ".."}${headRef}`;
+    label = `diff ${diffSpec}${pathLabel}`;
+    const log = tryGit(cwd, ["log", "--oneline", `${base}..${headRef}`, ...pathspec]);
+    const diff = tryGit(cwd, ["diff", diffSpec, ...pathspec]);
     if (!diff.trim() && !log.trim()) {
-      return { label, input: "", isEmpty: true };
+      return { label, input: "", isEmpty: true, truncated: false };
     }
-    body = [section("Commits since base", log), section("Diff vs base", diff)].filter(Boolean).join("\n");
+    body = [section("Commits in range", log), section(`Diff (${diffSpec})`, diff)].filter(Boolean).join("\n");
   } else {
-    label = "uncommitted working tree changes";
-    const status = tryGit(cwd, ["status", "--short", "--untracked-files=all"]);
-    const staged = tryGit(cwd, ["diff", "--cached"]);
-    const unstaged = tryGit(cwd, ["diff"]);
-    const untracked = collectUntracked(cwd);
+    label = `uncommitted working tree changes${pathLabel}`;
+    const status = tryGit(cwd, ["status", "--short", "--untracked-files=all", ...pathspec]);
+    const staged = tryGit(cwd, ["diff", "--cached", ...pathspec]);
+    const unstaged = tryGit(cwd, ["diff", ...pathspec]);
+    const untracked = collectUntracked(cwd, paths);
     if (!staged.trim() && !unstaged.trim() && untracked.count === 0) {
-      return { label, input: "", isEmpty: true };
+      return { label, input: "", isEmpty: true, truncated: false };
     }
     body = [
       section("git status", status),
@@ -138,9 +176,12 @@ export function collectReviewInput(cwd, { base = null, scope = "auto" } = {}) {
   }
 
   let input = body;
-  if (input.length > MAX_REVIEW_INPUT_CHARS) {
+  // Truncation used to exist only as a sentence inside the prompt, where the
+  // caller never saw it and the model was left to mention it or not.
+  const truncated = input.length > MAX_REVIEW_INPUT_CHARS;
+  if (truncated) {
     input = `${input.slice(0, MAX_REVIEW_INPUT_CHARS)}\n\n[Review input truncated at ${MAX_REVIEW_INPUT_CHARS} characters. Use the repository checkout to inspect the rest.]`;
   }
 
-  return { label, input, isEmpty: false };
+  return { label, input, isEmpty: false, truncated, truncatedAtChars: truncated ? MAX_REVIEW_INPUT_CHARS : null, totalChars: body.length };
 }
