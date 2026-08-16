@@ -148,6 +148,14 @@ test("result --wait blocks until the job finishes, then prints the render", () =
   assert.equal(jobs.find((job) => job.id === jobId).status, "completed");
 });
 
+test("status --wait validates --timeout-ms the same way", () => {
+  const fake = makeFakeEnv();
+  const cwd = makeTempGitRepo();
+  const result = runCompanion(["status", "any-id", "--wait", "--timeout-ms", "later"], { env: fake.env, cwd });
+  assert.equal(result.status, 1);
+  assert.match(result.stdout + result.stderr, /No job found|--timeout-ms must be a positive number/);
+});
+
 test("result --wait gives up at its deadline instead of hanging", () => {
   const fake = makeFakeEnv();
   const cwd = makeTempGitRepo();

@@ -789,8 +789,13 @@ async function commandStatus(tokens) {
       return;
     }
     if (flags.has("--wait")) {
-      const timeoutMs = Number(flags.get("--timeout-ms")) || STATUS_WAIT_DEFAULT_TIMEOUT_MS;
-      const deadline = Date.now() + timeoutMs;
+      const timeout = resolveTimeoutMs(flags, STATUS_WAIT_DEFAULT_TIMEOUT_MS);
+      if (timeout.error) {
+        print(timeout.error);
+        process.exitCode = 1;
+        return;
+      }
+      const deadline = Date.now() + timeout.timeoutMs;
       // findJob reconciles, so a job whose process died returns a terminal
       // status and this loop stops immediately instead of waiting out the
       // whole budget on a record that can never change again.
