@@ -93,6 +93,20 @@ test("rescue docs replace `return nothing` with a structured failure line", () =
     assert.match(text, /at most one `result <id>`/, `${name} must allow retrieving its own job`);
     assert.match(text, /never write your own answer/i, `${name} must keep the substitution ban`);
   }
+
+  // The slash command briefs the same subagent, and it still carried the older
+  // rule — "do not ask the subagent to poll `/opencode:status`, fetch
+  // `/opencode:result`" — which forbids the recovery the two documents above
+  // now require. Whichever the model read first decided whether a killed
+  // forwarder was allowed to go and get the answer that already existed.
+  const command = readDoc("commands", "rescue.md");
+  assert.doesNotMatch(
+    command,
+    /poll `\/opencode:status`, fetch `\/opencode:result`/,
+    "commands/rescue.md must not ban the recovery the rescue contract requires"
+  );
+  assert.match(command, /OPENCODE_RESCUE_FAILED/, "commands/rescue.md must name the failure line too");
+  assert.match(command, /at most one `result <id>`/);
 });
 
 // `--background` / `--wait` are Claude-side execution flags; forwarding them to
@@ -157,7 +171,10 @@ test("the changelog's review claims match the runtime that shipped", () => {
 test("rescue docs route through the exported entry point, never a versioned path", () => {
   for (const [name, text] of [
     ["skills/opencode-cli-runtime/SKILL.md", readDoc("skills", "opencode-cli-runtime", "SKILL.md")],
-    ["agents/opencode-rescue.md", readDoc("agents", "opencode-rescue.md")]
+    ["agents/opencode-rescue.md", readDoc("agents", "opencode-rescue.md")],
+    // The slash command briefs the same subagent and was left on the bare
+    // plugin-root path, which is the fallback rather than the route.
+    ["commands/rescue.md", readDoc("commands", "rescue.md")]
   ]) {
     assert.match(
       text,

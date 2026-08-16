@@ -23,7 +23,7 @@ Execution mode:
 - Otherwise, before starting opencode, check for a resumable rescue session from this Claude session by running:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task-resume-candidate --json
+node "${OPENCODE_COMPANION_BIN:-${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs}" task-resume-candidate --json
 ```
 
 - If that helper reports `available: true`, use `AskUserQuestion` exactly once to ask whether to continue the current opencode session or start a new one.
@@ -38,10 +38,11 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task-resume-candidat
 
 Operating rules:
 
-- The subagent is a thin forwarder only. It should use one `Bash` call to invoke `node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task ...` and return that command's stdout as-is.
+- The subagent is a thin forwarder only. It should use one `Bash` call to invoke `node "${OPENCODE_COMPANION_BIN:-${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs}" task ...` and return that command's stdout as-is.
 - Return the opencode companion stdout verbatim to the user.
 - Do not paraphrase, summarize, rewrite, or add commentary before or after it.
-- Do not ask the subagent to inspect files, monitor progress, poll `/opencode:status`, fetch `/opencode:result`, call `/opencode:cancel`, summarize output, or do follow-up work of its own.
+- Do not ask the subagent to inspect files, monitor progress, call `/opencode:cancel`, summarize output, or do work of its own. Independent work stays banned: it must never write its own answer, retry with a different prompt, or touch the repository.
+- Retrieving its own result is not follow-up work, and it is the one exception. If the `Bash` call fails, is killed by a timeout, or was detached and so returned nothing, the subagent may fetch **the job it started and no other**, within the bounds `skills/opencode-cli-runtime/SKILL.md` sets: at most one `status <id> --wait --timeout-ms <ms>` (or at most three plain `status <id>`) plus at most one `result <id>`. With still no output it returns the single line `OPENCODE_RESCUE_FAILED: <reason> | job=<id> | log=<path>`. Silence is the one answer it may not give: 6 of 13 recorded dispatches returned nothing while their job had already completed.
 - Leave `--variant` unset unless the user explicitly asks for a specific reasoning effort (opencode calls this a model variant, e.g. `high`, `max`, `minimal`).
 - Leave the model unset unless the user explicitly asks for one. Models are passed as `provider/model` exactly as `opencode models` lists them.
 - Leave `--resume`, `--resume-session <id>` and `--fresh` in the forwarded request. The subagent handles that routing when it builds the `task` command.
