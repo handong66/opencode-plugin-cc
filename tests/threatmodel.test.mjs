@@ -40,3 +40,28 @@ test("--threat-model reaches the reviewer, and its absence has a stated default"
   assert.match(prompt, /No threat model was supplied by the caller/);
   assert.match(prompt, /single-user local application/);
 });
+
+// Plain `review` shared the flag spec, so it accepted --threat-model, escaped
+// the unknown-flag rejection, and then dropped the text during interpolation:
+// `prompts/review.md` has no {{THREAT_MODEL}} slot. Documented nowhere,
+// rejected nowhere, honoured nowhere — the shape 补充发现 3 rules out.
+test("plain review rejects --threat-model instead of accepting and dropping it", () => {
+  const fake = makeFakeEnv({ mode: "review-json" });
+  const cwd = makeTempGitRepo();
+  const boundary = "single-user local tool XYZZY";
+
+  const rejected = runCompanion(["review", "--threat-model", boundary], { env: fake.env, cwd });
+  assert.equal(rejected.status, 1, rejected.stdout + rejected.stderr);
+  assert.match(rejected.stdout, /Unknown flag: --threat-model/);
+  assert.match(rejected.stdout, /adversarial-review flag/);
+  assert.equal(fs.existsSync(fake.argsFile), false, "the run must not start with a flag that cannot be honoured");
+
+  // The review prompt has no slot for it, and none is invented.
+  const reviewPrompt = fs.readFileSync(path.join(REPO_ROOT, "plugins", "opencode", "prompts", "review.md"), "utf8");
+  assert.doesNotMatch(reviewPrompt, /THREAT_MODEL/);
+
+  // The adversarial command still honours it end to end.
+  const accepted = runCompanion(["adversarial-review", "--threat-model", boundary], { env: fake.env, cwd });
+  assert.equal(accepted.status, 0, accepted.stdout + accepted.stderr);
+  assert.match(readRunArgs(fake).at(-1), /XYZZY/);
+});

@@ -733,23 +733,35 @@ const REVIEW_SCOPES = ["auto", "working-tree", "branch"];
 // task" — so the boundary is an input, and out-of-model findings are advisory.
 const DEFAULT_THREAT_MODEL =
   "No threat model was supplied by the caller. Unless the repository itself says otherwise, assume a single-user local application with no network exposure and no untrusted input.";
-const REVIEW_FLAG_SUMMARY =
-  "Supported: --base <ref|A..B|A...B>, --head <ref>, --scope auto|working-tree|branch, --paths <glob,...>, --files <path,...>, --rubric-file <path>, --model <provider/model>, --variant <level>, --timeout-ms <ms>, --json.";
+const REVIEW_VALUE_FLAGS = [
+  "--base",
+  "--head",
+  "--scope",
+  "--paths",
+  "--files",
+  "--rubric-file",
+  "--model",
+  "--variant",
+  "--timeout-ms"
+];
+// `--threat-model` is only meaningful where a prompt has a slot for it. It used
+// to sit in the shared flag list, so plain `review` accepted it, escaped the
+// unknown-flag rejection, and then dropped it during interpolation because
+// `prompts/review.md` has no `{{THREAT_MODEL}}` — documented nowhere, rejected
+// nowhere, honoured nowhere. Accept-and-forward or reject-with-the-list; this
+// is the reject side of that choice.
+function reviewFlagSummary(adversarial) {
+  const flags = [...REVIEW_VALUE_FLAGS, ...(adversarial ? ["--threat-model <text>"] : [])]
+    .map((flag) => (flag === "--base" ? "--base <ref|A..B|A...B>" : flag))
+    .join(", ");
+  return `Supported: ${flags}, --json.${
+    adversarial ? "" : " (--threat-model is an adversarial-review flag: only that prompt judges findings against a boundary.)"
+  }`;
+}
 
 async function commandReview(tokens, { adversarial }) {
   const { flags, rest, errors, unknownFlags } = parseFlags(tokens, {
-    valueFlags: [
-      "--base",
-      "--head",
-      "--scope",
-      "--paths",
-      "--files",
-      "--rubric-file",
-      "--model",
-      "--variant",
-      "--timeout-ms",
-      "--threat-model"
-    ],
+    valueFlags: adversarial ? [...REVIEW_VALUE_FLAGS, "--threat-model"] : REVIEW_VALUE_FLAGS,
     booleanFlags: ["--json", "--wait", "--background"]
   });
   if (errors.length > 0) {
@@ -764,7 +776,7 @@ async function commandReview(tokens, { adversarial }) {
   // adversarial path reads — so `--scpoe branch` ran a default review and said
   // nothing. Same family as P-HELP's leading unknown flag on `task`.
   if (unknownFlags.length > 0) {
-    print(`Unknown flag: ${unknownFlags[0]}. ${REVIEW_FLAG_SUMMARY}`);
+    print(`Unknown flag: ${unknownFlags[0]}. ${reviewFlagSummary(adversarial)}`);
     process.exitCode = 1;
     return;
   }
@@ -845,9 +857,16 @@ async function commandReview(tokens, { adversarial }) {
     SEVERITY_RUBRIC: rubric
       ? `The caller supplied this severity vocabulary. Map their terms onto the schema's \`critical|high|medium|low\` enum — the JSON shape does not change — and use their definitions when deciding how severe a finding is:\n${rubric}`
       : "No custom severity vocabulary was supplied; use the schema's own critical/high/medium/low definitions.",
-    THREAT_MODEL: threatModel
-      ? `The caller states the boundary of this system as: ${threatModel}`
-      : DEFAULT_THREAT_MODEL
+    // Only the adversarial template has a `{{THREAT_MODEL}}` slot, and only the
+    // adversarial parser accepts the flag, so the value is never built for a
+    // template that would silently discard it.
+    ...(adversarial
+      ? {
+          THREAT_MODEL: threatModel
+            ? `The caller states the boundary of this system as: ${threatModel}`
+            : DEFAULT_THREAT_MODEL
+        }
+      : {})
   });
 
   const kind = adversarial ? "adversarial-review" : "review";
@@ -1372,7 +1391,11 @@ const SUBCOMMAND_HELP = {
     "usage: opencode-companion review [flags] [focus text]",
     "",
     "  --base <ref|A..B|A...B>  review a commit range instead of the working tree",
-    "  --head <ref>            the other end of the range (default HEAD)",
+    "  --head <ref>            the other end of the range (default HEAD); needs --base,",
+    "                          and is rejected on its own rather than reviewing the",
+    "                          working tree instead",
+    "  --threat-model <text>   rejected here: only adversarial-review judges findings",
+    "                          against a boundary",
     "  --paths <glob,...>      limit the review to these pathspecs (--files is an alias)",
     "  --rubric-file <path>    severity vocabulary to judge by (the JSON schema is unchanged)",
     "  --scope auto|working-tree|branch   (staged-only / unstaged-only are rejected)",
@@ -1388,7 +1411,7 @@ const SUBCOMMAND_HELP = {
     "usage: opencode-companion adversarial-review [flags] [focus text]",
     "",
     "  --base <ref|A..B|A...B>  review a commit range instead of the working tree",
-    "  --head <ref>            the other end of the range (default HEAD)",
+    "  --head <ref>            the other end of the range (default HEAD); needs --base",
     "  --paths <glob,...>      limit the review to these pathspecs (--files is an alias)",
     "  --rubric-file <path>    severity vocabulary to judge by (the JSON schema is unchanged)",
     "  --scope auto|working-tree|branch   (staged-only / unstaged-only are rejected)",
@@ -1466,8 +1489,8 @@ function commandHelp(subcommand = null) {
       "Subcommands (run `<subcommand> --help` for its flags):",
       "  setup [--json] [--enable-review-gate|--disable-review-gate]",
       "  task [--json] [--model <provider/model>] [--variant <v>] [--write|--read-only] [--resume-last|--resume-session <id>] [--timeout-ms <ms>] <task text>",
-      "  review [--base <ref|A..B>] [--head <ref>] [--paths <globs>] [--scope ...] [--model <m>] [--json] [focus text]",
-      "  adversarial-review [--base <ref|A..B>] [--head <ref>] [--paths <globs>] [--threat-model <text>] [focus text]",
+      "  review [--base <ref|A..B> [--head <ref>]] [--paths <globs>] [--scope ...] [--model <m>] [--json] [focus text]",
+      "  adversarial-review [--base <ref|A..B> [--head <ref>]] [--paths <globs>] [--threat-model <text>] [focus text]",
       "  status [job-id] [--all] [--wait] [--timeout-ms <ms>] [--json]",
       "  result [job-id] [--wait] [--timeout-ms <ms>] [--json|--structured-only]",
       "  cancel [job-id]",
