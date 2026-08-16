@@ -151,3 +151,22 @@ test("SessionStart exports the companion entry point", () => {
   assert.match(exported, /export OPENCODE_COMPANION_BIN='.*scripts\/opencode-companion\.mjs'/);
   assert.match(exported, /export OPENCODE_COMPANION_DATA_DIR=/);
 });
+
+// X10: 0.1-era plugins wrote job state into the user's own repository. One such
+// directory was still there a month after they asked for it to be ignored, and
+// a sibling project's lint run failed on it.
+test("setup reports a leftover 0.1-era state directory without deleting it", () => {
+  const fake = makeFakeEnv();
+  const cwd = makeTempGitRepo();
+  const leftover = path.join(cwd, ".opencode-plugin-codex");
+  fs.mkdirSync(path.join(leftover, "jobs"), { recursive: true });
+
+  const report = JSON.parse(runCompanion(["setup", "--json"], { env: fake.env, cwd }).stdout);
+  assert.equal(report.legacyStateDirs.length, 1);
+  assert.match(report.legacyStateDirs[0], /\.opencode-plugin-codex$/);
+
+  const human = runCompanion(["setup"], { env: fake.env, cwd });
+  assert.match(human.stdout, /Leftover 0\.1-era directory/);
+  assert.match(human.stdout, /safe to delete/);
+  assert.equal(fs.existsSync(leftover), true, "setup must never delete it");
+});

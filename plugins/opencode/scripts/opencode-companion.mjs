@@ -905,6 +905,22 @@ async function commandReview(tokens, { adversarial }) {
   process.exitCode = exitCodeForOutputState(outputState);
 }
 
+// X10: 0.1-era plugins wrote job state into the user's repository. The user
+// asked for those directories to be gitignored at the time; one was still
+// present a month later, and a sibling project's lint run failed on it. Only
+// reported, never deleted: this is the user's working tree.
+const LEGACY_STATE_DIRS = [".opencode-plugin-codex", ".grok-plugin-codex", ".opencode-plugin-cc"];
+
+function findLegacyStateDirs(cwd) {
+  return LEGACY_STATE_DIRS.map((name) => path.join(cwd, name)).filter((candidate) => {
+    try {
+      return fs.statSync(candidate).isDirectory();
+    } catch {
+      return false;
+    }
+  });
+}
+
 function commandSetup(tokens) {
   const { flags } = parseFlags(tokens, {
     booleanFlags: ["--json", "--enable-review-gate", "--disable-review-gate"]
@@ -944,6 +960,7 @@ function commandSetup(tokens) {
     nodeVersion: process.version,
     stateDir: resolveStateDir(cwd),
     stateSource: resolveStateLocation(cwd).source,
+    legacyStateDirs: findLegacyStateDirs(cwd),
     guidance: availability.available
       ? availability.authenticated
         ? null
@@ -976,6 +993,11 @@ function commandSetup(tokens) {
   }
   lines.push(`Node: ${process.version}`);
   lines.push(`Plugin: opencode ${pluginVersion() ?? "unknown"} (${COMPANION_PATH})`);
+  for (const leftover of findLegacyStateDirs(cwd)) {
+    lines.push(
+      `Leftover 0.1-era directory: ${leftover}. Job state has lived in a central store since then, so this one is stale and safe to delete — it is not removed automatically. (One such directory made a sibling project's lint run fail.)`
+    );
+  }
   lines.push(
     `Stop-time review gate: ${gateEnabled ? "enabled" : "disabled"} (toggle with /opencode:setup --enable-review-gate | --disable-review-gate)`
   );
