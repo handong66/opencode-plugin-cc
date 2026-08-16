@@ -160,6 +160,32 @@ test("task --json and review --json carry the model fields the README promises",
   }
 });
 
+// The other half of the same README sentence: "every one of those documents
+// also carries `jobId`". `task --json` and `review --json` do; `status <id>
+// --json` and `result <id> --json` shipped `{job, hasResult, resultComplete}`
+// and `{job, payload}`, so a caller that read `doc.jobId` uniformly across the
+// four documents got `undefined` on exactly the two that address a stored run.
+test("the single-job status and result documents carry a top-level jobId", () => {
+  const fake = makeFakeEnv();
+  const cwd = makeTempGitRepo();
+
+  const task = JSON.parse(runCompanion(["task", "--json", "--", "do the work"], { env: fake.env, cwd }).stdout);
+  assert.match(task.jobId, /^task-/);
+
+  const status = JSON.parse(runCompanion(["status", task.jobId, "--json"], { env: fake.env, cwd }).stdout);
+  assert.equal(status.jobId, task.jobId, "status --json must name the job it describes at the top level");
+  assert.equal(status.jobId, status.job.id, "and it must agree with the record it wraps");
+
+  const result = JSON.parse(runCompanion(["result", task.jobId, "--json"], { env: fake.env, cwd }).stdout);
+  assert.equal(result.jobId, task.jobId, "result --json must name the job it returns");
+  assert.equal(result.jobId, result.job.id);
+
+  // The bare `result --json` (no id) resolves the newest finished job, and the
+  // id it settled on is exactly what the caller cannot otherwise know.
+  const newest = JSON.parse(runCompanion(["result", "--json"], { env: fake.env, cwd }).stdout);
+  assert.equal(newest.jobId, task.jobId);
+});
+
 // PC5 asked for the model that actually ran. Deriving it from `~/.config` alone
 // makes a confident claim about a model that never ran in any repository with
 // its own `opencode.json` — which opencode applies over the global file.

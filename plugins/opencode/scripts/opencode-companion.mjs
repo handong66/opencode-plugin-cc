@@ -1198,7 +1198,11 @@ async function commandStatus(tokens) {
     }
     const payload = readJobFile(cwd, jobId);
     if (flags.has("--json")) {
+      // `jobId` at the top level, the way `task --json` and `review --json`
+      // carry it: a caller that reads `doc.jobId` across the four documents
+      // should not have to know that two of them hide the id one level down.
       printJson({
+        jobId: job.id,
         job: withElapsed(job),
         hasResult: Boolean(payload),
         resultComplete: payload?.resultComplete ?? job.resultComplete ?? null
@@ -1288,7 +1292,10 @@ async function commandResult(tokens) {
   }
 
   if (flags.has("--json")) {
-    printJson({ job, payload: { ...payload, rendered: undefined } });
+    // Same reason as `status --json`, and more load-bearing here: called
+    // without an id this command picks the newest finished job, so the id it
+    // settled on is information the caller has no other way to obtain.
+    printJson({ jobId: job.id, job, payload: { ...payload, rendered: undefined } });
     return;
   }
 
