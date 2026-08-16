@@ -722,12 +722,18 @@ async function commandTask(tokens) {
 }
 
 const REVIEW_SCOPES = ["auto", "working-tree", "branch"];
+// X3: an adversarial review with no stated boundary reports network-attacker
+// findings against a single-user local tool, and those findings then interrupt
+// the user's actual task. The user's own words: "please stop interrupting my
+// task" — so the boundary is an input, and out-of-model findings are advisory.
+const DEFAULT_THREAT_MODEL =
+  "No threat model was supplied by the caller. Unless the repository itself says otherwise, assume a single-user local application with no network exposure and no untrusted input.";
 const REVIEW_FLAG_SUMMARY =
   "Supported: --base <ref>, --scope auto|working-tree|branch, --model <provider/model>, --variant <level>, --timeout-ms <ms>, --json.";
 
 async function commandReview(tokens, { adversarial }) {
   const { flags, rest, errors, unknownFlags } = parseFlags(tokens, {
-    valueFlags: ["--base", "--scope", "--model", "--variant", "--timeout-ms"],
+    valueFlags: ["--base", "--scope", "--model", "--variant", "--timeout-ms", "--threat-model"],
     booleanFlags: ["--json", "--wait", "--background"]
   });
   if (errors.length > 0) {
@@ -797,10 +803,14 @@ async function commandReview(tokens, { adversarial }) {
   }
   const templateName = adversarial ? "adversarial-review" : "review";
   const template = loadPromptTemplate(ROOT_DIR, templateName);
+  const threatModel = flags.get("--threat-model");
   const prompt = interpolateTemplate(template, {
     TARGET_LABEL: reviewInput.label,
     REVIEW_INPUT: reviewInput.input,
-    USER_FOCUS: focus || "(none provided)"
+    USER_FOCUS: focus || "(none provided)",
+    THREAT_MODEL: threatModel
+      ? `The caller states the boundary of this system as: ${threatModel}`
+      : DEFAULT_THREAT_MODEL
   });
 
   const kind = adversarial ? "adversarial-review" : "review";
@@ -1308,6 +1318,8 @@ const SUBCOMMAND_HELP = {
     "  --scope auto|working-tree|branch   (staged-only / unstaged-only are rejected)",
     "  --model <provider/model>  override the model (leave unset to use opencode's default)",
     "  --variant <level>       reasoning variant",
+    "  --threat-model <text>   the boundary to judge findings against; findings outside",
+    "                          it are labelled out-of-model and cannot block",
     "  --json                  machine-readable result on stdout",
     "  --timeout-ms <ms>       companion-side deadline for the run (default 900000)",
     ...EXECUTION_FLAG_NOTE,

@@ -1,6 +1,6 @@
 ---
 description: Run an opencode review that challenges the implementation approach and design choices
-argument-hint: '[--wait|--background] [--base <ref>] [--scope auto|working-tree|branch] [focus ...]'
+argument-hint: '[--wait|--background] [--base <ref>] [--scope auto|working-tree|branch] [--threat-model "<boundary>"] [focus ...]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), AskUserQuestion
 ---
@@ -17,6 +17,7 @@ Core constraint:
 - Do not fix issues, apply patches, or suggest that you are about to make changes.
 - Your only job is to run the review and return opencode's output verbatim to the user.
 - Keep the framing focused on whether the current approach is the right one, what assumptions it depends on, and where the design could fail under real-world conditions.
+- `--threat-model "<boundary>"` states what the system is actually exposed to (for example `single-user local application, no network exposure`). Preserve it for the forwarded companion call. Without it the reviewer assumes a single-user local application. Findings outside the stated boundary come back labelled `out-of-model`: they are advisory, they cannot produce a blocking verdict, and you must never let one interrupt work the user already has in flight.
 
 Execution mode rules:
 - If the raw arguments include `--wait`, do not ask. Run in the foreground.
