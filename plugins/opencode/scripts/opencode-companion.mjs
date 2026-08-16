@@ -613,9 +613,13 @@ async function commandTask(tokens) {
   process.exitCode = exitCodeForOutputState(outputState);
 }
 
+const REVIEW_SCOPES = ["auto", "working-tree", "branch"];
+const REVIEW_FLAG_SUMMARY =
+  "Supported: --base <ref>, --scope auto|working-tree|branch, --model <provider/model>, --variant <level>, --timeout-ms <ms>, --json.";
+
 async function commandReview(tokens, { adversarial }) {
-  const { flags, rest, errors } = parseFlags(tokens, {
-    valueFlags: ["--base", "--scope", "--timeout-ms"],
+  const { flags, rest, errors, unknownFlags } = parseFlags(tokens, {
+    valueFlags: ["--base", "--scope", "--model", "--variant", "--timeout-ms"],
     booleanFlags: ["--json", "--wait", "--background"]
   });
   if (errors.length > 0) {
@@ -624,6 +628,25 @@ async function commandReview(tokens, { adversarial }) {
     return;
   }
   if (rejectsBackgroundFlag(flags)) {
+    return;
+  }
+  // A flag this command does not know used to land in `rest`, which only the
+  // adversarial path reads — so `--scpoe branch` ran a default review and said
+  // nothing. Same family as P-HELP's leading unknown flag on `task`.
+  if (unknownFlags.length > 0) {
+    print(`Unknown flag: ${unknownFlags[0]}. ${REVIEW_FLAG_SUMMARY}`);
+    process.exitCode = 1;
+    return;
+  }
+  // An unvalidated scope silently reviewed something else: `--scope staged` and
+  // `--scope unstaged` are documented as unsupported, and both fell through to
+  // the working-tree branch, whose output was then relayed as authoritative.
+  const scope = flags.get("--scope") ?? "auto";
+  if (!REVIEW_SCOPES.includes(scope)) {
+    print(
+      `Unsupported --scope "${scope}". Use one of: ${REVIEW_SCOPES.join(", ")}. (Staged-only and unstaged-only reviews are not supported; review the working tree, or commit and use --base <ref>.)`
+    );
+    process.exitCode = 1;
     return;
   }
   const timeout = resolveTimeoutMs(flags, RUN_TIMEOUT_DEFAULT_MS);
@@ -642,7 +665,7 @@ async function commandReview(tokens, { adversarial }) {
   try {
     reviewInput = collectReviewInput(cwd, {
       base: flags.get("--base") ?? null,
-      scope: flags.get("--scope") ?? "auto"
+      scope
     });
   } catch (error) {
     print(error instanceof Error ? error.message : String(error));
@@ -655,7 +678,15 @@ async function commandReview(tokens, { adversarial }) {
     return;
   }
 
-  const focus = adversarial ? rest.join(" ").trim() : "";
+  const strayText = rest.join(" ").trim();
+  const focus = adversarial ? strayText : "";
+  // `review` has no slot for focus text and used to drop it without a word, so
+  // the caller believed their instructions had reached the reviewer.
+  if (!adversarial && strayText) {
+    process.stderr.write(
+      `warning: /opencode:review does not take focus text, so "${firstLine(strayText, 80)}" was not sent to the reviewer. Use /opencode:adversarial-review for a review with extra focus.\n`
+    );
+  }
   const templateName = adversarial ? "adversarial-review" : "review";
   const template = loadPromptTemplate(ROOT_DIR, templateName);
   const prompt = interpolateTemplate(template, {
@@ -665,9 +696,13 @@ async function commandReview(tokens, { adversarial }) {
   });
 
   const kind = adversarial ? "adversarial-review" : "review";
+  const model = flags.get("--model") ?? null;
+  const variant = flags.get("--variant") ?? null;
   const { ok, outputState, payload } = await executeJob({
     kind,
     cwd,
+    model,
+    variant,
     timeoutMs: timeout.timeoutMs,
     asJson,
     promptPreview: adversarial
@@ -675,6 +710,8 @@ async function commandReview(tokens, { adversarial }) {
       : `review of ${reviewInput.label}`,
     opencodeOptions: {
       prompt,
+      model,
+      variant,
       readOnly: true,
       rules: REVIEW_RULES,
       jsonSchema: loadReviewSchema(),
@@ -1096,16 +1133,22 @@ const SUBCOMMAND_HELP = {
     "usage: opencode-companion review [flags]",
     "",
     "  --base <ref>            review <ref>...HEAD instead of the working tree",
-    "  --scope auto|working-tree|branch",
+    "  --scope auto|working-tree|branch   (staged-only / unstaged-only are rejected)",
+    "  --model <provider/model>  override the model (leave unset to use opencode's default)",
+    "  --variant <level>       reasoning variant",
     "  --json                  machine-readable result on stdout",
     "  --timeout-ms <ms>       companion-side deadline for the run (default 900000)",
-    ...EXECUTION_FLAG_NOTE
+    ...EXECUTION_FLAG_NOTE,
+    "",
+    "review takes no focus text; use adversarial-review for that."
   ],
   "adversarial-review": [
     "usage: opencode-companion adversarial-review [flags] [focus text]",
     "",
     "  --base <ref>            review <ref>...HEAD instead of the working tree",
-    "  --scope auto|working-tree|branch",
+    "  --scope auto|working-tree|branch   (staged-only / unstaged-only are rejected)",
+    "  --model <provider/model>  override the model (leave unset to use opencode's default)",
+    "  --variant <level>       reasoning variant",
     "  --json                  machine-readable result on stdout",
     "  --timeout-ms <ms>       companion-side deadline for the run (default 900000)",
     ...EXECUTION_FLAG_NOTE,
@@ -1162,8 +1205,8 @@ function commandHelp(subcommand = null) {
       "Subcommands (run `<subcommand> --help` for its flags):",
       "  setup [--json] [--enable-review-gate|--disable-review-gate]",
       "  task [--json] [--model <provider/model>] [--variant <v>] [--write|--read-only] [--resume-last] [--timeout-ms <ms>] <task text>",
-      "  review [--base <ref>] [--scope auto|working-tree|branch] [--timeout-ms <ms>] [--json]",
-      "  adversarial-review [--base <ref>] [--scope ...] [--timeout-ms <ms>] [focus text]",
+      "  review [--base <ref>] [--scope auto|working-tree|branch] [--model <m>] [--variant <v>] [--timeout-ms <ms>] [--json]",
+      "  adversarial-review [--base <ref>] [--scope ...] [--model <m>] [--timeout-ms <ms>] [focus text]",
       "  status [job-id] [--all] [--wait] [--timeout-ms <ms>] [--json]",
       "  result [job-id] [--wait] [--timeout-ms <ms>] [--json]",
       "  cancel [job-id]",
