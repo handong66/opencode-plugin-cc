@@ -138,6 +138,17 @@ export function collectReviewInput(cwd, { base = null, head = null, scope = "aut
   if (scope === "branch" && !base) {
     throw new Error("--scope branch requires --base <ref> (or a range such as --base main..HEAD).");
   }
+  // `--head` names *one end* of a range, so on its own there is nothing to diff
+  // against. The branch arm used to be gated on `--base` alone, which meant a
+  // caller who wrote `review --head <sha>` — the form the slash commands now
+  // advertise — got a working-tree review of their dirty files instead, with no
+  // error and no warning. Same silent-argument-drop family the unknown-flag
+  // rejection was added for; say so rather than reviewing something else.
+  if (head && !useBranch) {
+    throw new Error(
+      "--head <ref> names one end of a commit range; pass --base <ref> as well (or write the whole range as --base A..B)."
+    );
+  }
 
   let label;
   let body;

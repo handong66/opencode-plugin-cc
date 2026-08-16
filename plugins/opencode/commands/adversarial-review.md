@@ -1,6 +1,6 @@
 ---
 description: Run an opencode review that challenges the implementation approach and design choices
-argument-hint: '[--wait|--background] [--base <ref|A..B>] [--head <ref>] [--paths <globs>] [--scope auto|working-tree|branch] [--threat-model "<boundary>"] [--rubric-file <path>] [focus ...]'
+argument-hint: '[--wait|--background] [--base <ref|A..B>] [--base <ref> --head <ref>] [--paths <globs>] [--scope auto|working-tree|branch] [--threat-model "<boundary>"] [--rubric-file <path>] [focus ...]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), AskUserQuestion
 ---
@@ -41,7 +41,8 @@ Argument handling:
 - The companion always runs in the foreground and now **rejects** `--background` with a non-zero exit, so forwarding it fails the run outright. Claude Code's `Bash(..., run_in_background: true)` is what actually detaches it.
 - Do not weaken the adversarial framing or rewrite the user's focus text.
 - `/opencode:adversarial-review` uses the same review target selection as `/opencode:review`.
-- It supports working-tree review, branch review, and `--base <ref>`.
+- It supports working-tree review, branch review, and `--base <ref>`; `--head <ref>` moves the other end of the range and needs `--base` alongside it.
+- `--threat-model "<boundary>"` is accepted here only. Plain `/opencode:review` rejects it, because only this prompt has a slot for it.
 - It does not support `--scope staged` or `--scope unstaged`.
 - Unlike `/opencode:review`, it can still take extra focus text after the flags.
 

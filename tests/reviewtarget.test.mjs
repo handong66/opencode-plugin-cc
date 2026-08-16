@@ -72,6 +72,27 @@ test("a bad ref is named, and truncation is reported as data", () => {
   assert.ok(working.totalChars > 0);
 });
 
+// `--head` without `--base` used to fall through to the working-tree arm: the
+// caller named a commit and got a review of their dirty files, exit 0, no
+// warning. That is the argument-drop family the unknown-flag rejection exists
+// to close, so it has to fail loudly instead.
+test("--head without --base is refused instead of reviewing the working tree", () => {
+  const { cwd, first } = makeHistory();
+  assert.throws(() => collectReviewInput(cwd, { head: first }), /--head <ref> names one end of a commit range/);
+  // The pair still works, and so does --scope branch with a base.
+  assert.equal(collectReviewInput(cwd, { base: first, head: "HEAD" }).isEmpty, false);
+
+  // End to end: a dirty tree is present, so the old behaviour would have exited
+  // 0 with a working-tree review of it.
+  fs.writeFileSync(path.join(cwd, "dirty.mjs"), "export const dirty = true;\n");
+  const fake = makeFakeEnv({ mode: "review-json" });
+  const result = runCompanion(["review", "--head", first], { env: fake.env, cwd });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout + result.stderr, /--head <ref> names one end of a commit range/);
+  assert.doesNotMatch(result.stdout, /uncommitted working tree changes/);
+  assert.equal(fs.existsSync(fake.argsFile), false, "opencode must not be spawned for a refused target");
+});
+
 test("review accepts focus text, a rubric and a range end to end", () => {
   const { cwd, first } = makeHistory();
   const fake = makeFakeEnv({ mode: "review-json" });
