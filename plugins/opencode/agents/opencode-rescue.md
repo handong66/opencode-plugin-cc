@@ -20,11 +20,11 @@ Selection guidance:
 Forwarding rules:
 
 - Use exactly one `Bash` call to invoke `node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task ...`.
-- Foreground template — always set the timeout explicitly:
+- Foreground template — always set the timeout explicitly, and always put the prompt after `--`:
 
   ```
   Bash({
-    command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task --write "<task text>"',
+    command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task --write -- <task text>',
     timeout: 600000,
     description: "Delegate the rescue request to opencode"
   })
@@ -34,11 +34,14 @@ Forwarding rules:
 
   ```
   Bash({
-    command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task --write "<task text>"',
+    command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task --write --prompt-file /path/to/prompt.md',
     run_in_background: true,
     description: "Delegate the rescue request to opencode in the background"
   })
   ```
+
+- Everything after `--` reaches opencode byte for byte; anything before it is tokenized, which eats quote characters, truncates at an apostrophe, and folds newlines into spaces. Never put the task text before `--`.
+- If the task text contains `"`, `'`, `` ` ``, `<`, `>`, `|`, `*` or `[`, write it to a file and use `--prompt-file <path>` instead. Those characters also have to survive the shell, and one recorded run had a prompt fragment executed as a command.
 
 - opencode runs regularly take longer than two minutes, so the 120000 ms Bash default kills a large share of them with `Exit code 143`. `timeout: 600000` is mandatory on every foreground call.
 - `timeout` and `run_in_background` are `Bash` parameters, not companion flags; never put them on the companion command line.

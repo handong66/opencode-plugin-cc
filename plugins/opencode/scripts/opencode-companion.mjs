@@ -6,7 +6,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-import { tokenize, parseFlags } from "./lib/args.mjs";
+import { tokenize, parseFlags, splitAtSentinel } from "./lib/args.mjs";
 import { extractClaudeMessages, buildHandoffTranscript } from "./lib/claude-transcript.mjs";
 import { collectReviewInput } from "./lib/git.mjs";
 import {
@@ -187,6 +187,34 @@ function installSignalHandlers() {
   }
 }
 
+// Prompt text that never passes through `tokenize` at all. `--prompt-file` is
+// the only form that is safe for prompts containing quotes, backticks, angle
+// brackets or pipes, because those also have to survive the caller's shell.
+function readPromptSource(flags) {
+  const file = flags.get("--prompt-file");
+  const fromStdin = flags.has("--prompt-stdin");
+  if (file && fromStdin) {
+    return { error: "Pass either --prompt-file or --prompt-stdin, not both." };
+  }
+  if (file) {
+    try {
+      return { text: fs.readFileSync(path.resolve(file), "utf8") };
+    } catch (error) {
+      return { error: `Could not read --prompt-file ${file}: ${error instanceof Error ? error.message : error}` };
+    }
+  }
+  if (fromStdin) {
+    try {
+      return { text: fs.readFileSync(0, "utf8") };
+    } catch (error) {
+      return {
+        error: `Could not read the prompt from stdin: ${error instanceof Error ? error.message : error}`
+      };
+    }
+  }
+  return null;
+}
+
 function resolveTimeoutMs(flags, defaultMs) {
   const raw = flags.get("--timeout-ms");
   if (raw === undefined) {
@@ -360,8 +388,16 @@ function exitCodeForOutputState(outputState) {
 
 async function commandTask(tokens) {
   const { flags, rest, errors, unknownFlags } = parseFlags(tokens, {
-    valueFlags: ["--model", "--variant", "--effort", "--timeout-ms"],
-    booleanFlags: ["--json", "--write", "--read-only", "--resume-last", "--wait", "--background"]
+    valueFlags: ["--model", "--variant", "--effort", "--timeout-ms", "--prompt-file"],
+    booleanFlags: [
+      "--json",
+      "--write",
+      "--read-only",
+      "--resume-last",
+      "--wait",
+      "--background",
+      "--prompt-stdin"
+    ]
   });
   const asJson = flags.has("--json");
   if (errors.length > 0) {
@@ -388,9 +424,26 @@ async function commandTask(tokens) {
     return;
   }
 
-  const taskText = rest.join(" ").trim();
+  const promptSource = readPromptSource(flags);
+  if (promptSource?.error) {
+    print(promptSource.error);
+    process.exitCode = 1;
+    return;
+  }
+  const freeText = rest.join(" ").trim();
+  if (promptSource && freeText) {
+    print(
+      `The prompt came from ${flags.get("--prompt-file") ? "--prompt-file" : "--prompt-stdin"}, but there is also free text on the command line (${firstLine(freeText, 60)}). Put everything in one place.`
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const taskText = (promptSource?.text ?? freeText).trim();
   if (!taskText) {
-    print("No task text provided. Tell opencode what to investigate, fix, or continue.");
+    print(
+      "No task text provided. Tell opencode what to investigate, fix, or continue (use `-- <text>` or --prompt-file <path> to keep quotes and newlines intact)."
+    );
     process.exitCode = 1;
     return;
   }
@@ -900,9 +953,12 @@ const EXECUTION_FLAG_NOTE = [
 
 const SUBCOMMAND_HELP = {
   task: [
-    "usage: opencode-companion task [flags] <task text>",
-    "       opencode-companion task [flags] -- <task text kept verbatim>",
+    "usage: opencode-companion task [flags] -- <task text kept verbatim>",
+    "       opencode-companion task [flags] --prompt-file <path>",
+    "       opencode-companion task [flags] <task text>   (tokenized: quotes and newlines are lost)",
     "",
+    "  --prompt-file <path>    read the prompt from a file, byte for byte",
+    "  --prompt-stdin          read the prompt from stdin, byte for byte",
     "  --json                  machine-readable result on stdout",
     "  --model <provider/model>  override the model (leave unset to use opencode's default)",
     "  --variant <level>       reasoning variant; --effort is an alias",
@@ -1026,7 +1082,15 @@ async function main() {
   // Slash commands forward `$ARGUMENTS` as one string that needs tokenizing;
   // programmatic callers (like the stop gate) pass pre-split argv whose
   // elements — especially multi-line prompts — must stay verbatim.
-  const tokens = restArgv.length > 1 ? restArgv : tokenize(restArgv[0] ?? "");
+  // In the single-string form, only the part before a standalone `--` is
+  // tokenized: everything after it is prompt text and must survive intact.
+  let tokens;
+  if (restArgv.length > 1) {
+    tokens = restArgv;
+  } else {
+    const { head, literal } = splitAtSentinel(restArgv[0] ?? "");
+    tokens = literal === null ? tokenize(head) : [...tokenize(head), "--", literal];
+  }
 
   // Before dispatch: the switch below only sees argv[2], so `task --help` used
   // to reach `commandTask` and be forwarded to the model as the prompt.

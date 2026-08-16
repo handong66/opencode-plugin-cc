@@ -9,13 +9,19 @@ user-invocable: false
 Use this skill only inside the `opencode:opencode-rescue` subagent.
 
 Primary helper:
-- `node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task "<raw arguments>"`
+- `node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task [flags] -- <prompt>`
+- or, for any prompt containing quotes, backticks, angle brackets, pipes or newlines: `task [flags] --prompt-file <path>`
+
+Prompt form rules:
+- Everything after `--` is passed to opencode byte for byte. Everything *before* it is tokenized, which drops quote characters, swallows text after an apostrophe, and folds newlines into spaces.
+- Never put the prompt before `--`. That older form silently corrupted multi-line and quoted review contracts.
+- When the prompt contains characters the shell also interprets (`"`, `'`, `` ` ``, `<`, `>`, `|`, `*`, `[`, `]`), write it to a file first and pass `--prompt-file <path>`. That is the only form that survives both the shell and the companion. `--prompt-stdin` is the equivalent for piped input.
 
 Invocation template (always set the Bash timeout explicitly):
 
 ```
 Bash({
-  command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task "<raw arguments>"',
+  command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task --write -- <prompt>',
   timeout: 600000,
   description: "Delegate the rescue request to opencode"
 })
@@ -25,7 +31,7 @@ For a long or open-ended rescue, detach instead of waiting:
 
 ```
 Bash({
-  command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task "<raw arguments>"',
+  command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task --write --prompt-file /path/to/prompt.md',
   run_in_background: true,
   description: "Delegate the rescue request to opencode in the background"
 })

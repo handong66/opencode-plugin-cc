@@ -58,6 +58,24 @@ test("prompt templates open with the headless delegation preamble", () => {
   }
 });
 
+// PC2: the documented single-argument form ran the prompt through `tokenize`,
+// which drops quotes and folds newlines — 8 of 39 recorded task calls used it,
+// all carrying quoted multi-line contracts.
+test("rescue docs teach the prompt forms that survive tokenization", () => {
+  for (const [name, text] of [
+    ["skills/opencode-cli-runtime/SKILL.md", readDoc("skills", "opencode-cli-runtime", "SKILL.md")],
+    ["agents/opencode-rescue.md", readDoc("agents", "opencode-rescue.md")]
+  ]) {
+    assert.match(text, /task .*--\s*<(?:task text|prompt)>/, `${name} must show the -- form`);
+    assert.match(text, /--prompt-file/, `${name} must offer --prompt-file for hostile prompts`);
+    assert.doesNotMatch(
+      text,
+      /task (?:--write )?"<(?:task text|raw arguments)>"/,
+      `${name} must not still document the quoted single-argument form`
+    );
+  }
+});
+
 // `--background` / `--wait` are Claude-side execution flags; forwarding them to
 // the companion is what made two 2026-07-21 runs die on the 2-minute wall.
 test("rescue docs keep --background as a Claude-side flag, not a companion flag", () => {

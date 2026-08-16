@@ -44,6 +44,25 @@ export function tokenize(input) {
   return tokens;
 }
 
+// `tokenize` is lossy by design (it drops quote characters and folds newlines
+// into single spaces), which is fine for flags and fatal for prompt text: the
+// documented single-argument form turned `Review "foo" and don't break it.` on
+// three lines into one line with the quotes eaten. Splitting the raw string at
+// a standalone `--` first keeps everything after it byte-for-byte.
+export function splitAtSentinel(input) {
+  const text = String(input ?? "");
+  const match = text.match(/(^|\s)--(\s|$)/);
+  if (!match) {
+    return { head: text, literal: null };
+  }
+  const sentinelAt = match.index + match[1].length;
+  // Drop exactly one separator after `--`; the rest of the string is verbatim.
+  return {
+    head: text.slice(0, sentinelAt),
+    literal: text.slice(sentinelAt + 2).replace(/^(\r?\n|[ \t])/, "")
+  };
+}
+
 // spec: { valueFlags: ["--model", ...], booleanFlags: ["--wait", ...] }
 // Returns { flags, rest, errors, unknownFlags }.
 // Unknown `--flags` are still treated as part of the free text so
