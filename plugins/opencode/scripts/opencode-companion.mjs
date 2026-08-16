@@ -206,7 +206,8 @@ async function executeJob({
   promptPreview,
   model = null,
   variant = null,
-  timeoutMs = RUN_TIMEOUT_DEFAULT_MS
+  timeoutMs = RUN_TIMEOUT_DEFAULT_MS,
+  asJson = false
 }) {
   const jobId = generateJobId(JOB_ID_PREFIXES[kind] ?? "job");
   const logFile = resolveJobLogFile(cwd, jobId);
@@ -223,6 +224,17 @@ async function executeJob({
     logFile,
     startedAt: new Date().toISOString()
   });
+
+  // The handle goes out before the run starts, not in the footer afterwards: a
+  // caller who detaches the companion with Bash(run_in_background: true) — 28
+  // recorded times — otherwise has no id to poll until the run is already over.
+  // In --json mode it goes to stderr so stdout stays a single JSON document.
+  const handle = { jobId, logFile, pollWith: `/opencode:status ${jobId}` };
+  if (asJson) {
+    process.stderr.write(`${JSON.stringify(handle)}\n`);
+  } else {
+    print(`Job: ${jobId} (${kind}, running) — poll with /opencode:status ${jobId}`);
+  }
 
   installSignalHandlers();
   inFlightRun = {
@@ -408,6 +420,7 @@ async function commandTask(tokens) {
     model: flags.get("--model") ?? null,
     variant,
     timeoutMs: timeout.timeoutMs,
+    asJson,
     promptPreview: taskText,
     opencodeOptions: {
       prompt: taskText,
@@ -496,6 +509,7 @@ async function commandReview(tokens, { adversarial }) {
     kind,
     cwd,
     timeoutMs: timeout.timeoutMs,
+    asJson,
     promptPreview: adversarial
       ? `adversarial review of ${reviewInput.label}${focus ? `: ${focus}` : ""}`
       : `review of ${reviewInput.label}`,
