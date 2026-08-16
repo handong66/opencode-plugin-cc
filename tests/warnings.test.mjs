@@ -93,6 +93,36 @@ test("a review verdict carries the evidence behind it", () => {
   assert.deepEqual(payload.warnings, [], "a review that did work must not be flagged");
 });
 
+// X2 (1): a caller must be able to drop a zero-evidence verdict without parsing
+// the warning text. The downgrade is its own field, so the run's own verdict
+// (`outputState`, exit code) keeps meaning "did opencode answer at all".
+test("a zero-evidence review is machine-readably incomplete", () => {
+  const fake = makeFakeEnv({ mode: "review-json" });
+  const cwd = makeTempGitRepo();
+  const result = runCompanion(["review", "--json"], { env: fake.env, cwd });
+  assert.equal(result.status, 0, result.stderr);
+
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.resultComplete, false, "0 tool calls behind a verdict is not a completed review");
+  assert.equal(payload.evidenceLevel, "none");
+  assert.equal(payload.outputState, "completed", "the run itself finished; only the verdict is downgraded");
+  assert.deepEqual(
+    payload.warnings.map((warning) => warning.class),
+    ["no_evidence_review"]
+  );
+
+  // It is stored with the job, so a caller that comes back later via
+  // `result --json` sees the same downgrade.
+  const stored = JSON.parse(runCompanion(["result", "--json"], { env: fake.env, cwd }).stdout);
+  assert.equal(stored.payload.resultComplete, false);
+
+  const withEvidence = makeFakeEnv({ mode: "review-json", extra: { OPENCODE_FAKE_TOOLS: "4" } });
+  const grounded = JSON.parse(
+    runCompanion(["review", "--json"], { env: withEvidence.env, cwd: makeTempGitRepo() }).stdout
+  );
+  assert.equal(grounded.resultComplete, true);
+});
+
 test("a task run is never flagged for a missing review evidence trail", () => {
   const fake = makeFakeEnv({ extra: { OPENCODE_FAKE_TEXT: "answer" } });
   const result = runCompanion(["task", "--json", "--write", "answer this"], {
@@ -102,6 +132,7 @@ test("a task run is never flagged for a missing review evidence trail", () => {
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.evidenceLevel, "none");
   assert.deepEqual(payload.warnings, []);
+  assert.equal(payload.resultComplete, true, "only review kinds are downgraded for missing evidence");
 });
 
 test("detectPermissionWarnings dedupes and names the working directory", () => {

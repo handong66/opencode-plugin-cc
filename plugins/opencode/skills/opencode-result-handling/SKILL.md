@@ -25,6 +25,7 @@ Evidence behind a review verdict:
 - `review` / `adversarial-review` report `evidenceLevel` (`none` | `thin` | `substantive`) next to the verdict and in `--json`. It is derived from how many tool calls the run made.
 - `evidenceLevel: none` means the reviewer looked at nothing beyond the diff that was inlined into its prompt. Present such a verdict as what it is: an opinion on the diff text. An `approve` with no evidence is **no signal** — do not count it as a passing vote, and never report it to the user as "opencode approved the change" without that qualification.
 - The helper prints a `no_evidence_review` warning in that case. Pass it on rather than dropping it.
+- The same judgement is machine-readable as `resultComplete` in `--json` and in the stored payload: it is `false` for a zero-evidence review and for any run that did not finish, `true` only when the run completed *and* the verdict has evidence behind it. Key off that field rather than re-deriving it; `outputState` still describes the run itself, so a zero-evidence review is `outputState: "completed"` with `resultComplete: false`.
 
 Job handles:
 - The first line of `task`/`review` stdout is the handle, printed before opencode starts: `Job: <id> (<kind>, running) — poll with /opencode:status <id>`. With `--json` the same handle is a JSON line on stderr (`{"jobId":…,"logFile":…,"pollWith":…}`) so stdout stays one JSON document.

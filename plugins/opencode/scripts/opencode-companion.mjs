@@ -189,6 +189,7 @@ function handleTerminationSignal(signal) {
             stopReason: parsed?.stopReason ?? null,
             outputState: "failed",
             outputStateReason: "interrupted",
+            resultComplete: false,
             toolEventCount: parsed?.toolEventCount ?? 0,
             opencodeSessionId: parsed?.sessionId ?? null,
             exitCode: null,
@@ -365,13 +366,22 @@ async function executeJob({
   // ungrounded review — but it does mean nothing outside the diff was looked at.
   const evidenceLevel =
     classification.toolEventCount === 0 ? "none" : classification.toolEventCount <= 2 ? "thin" : "substantive";
-  if ((kind === "review" || kind === "adversarial-review") && evidenceLevel === "none") {
+  const isReviewKind = kind === "review" || kind === "adversarial-review";
+  const noEvidenceReview = isReviewKind && evidenceLevel === "none";
+  if (noEvidenceReview) {
     warnings.push({
       class: "no_evidence_review",
       message:
         "no_evidence_review: this verdict was produced with 0 tool calls. The diff was inlined in the prompt, so the verdict can only be defended for what the diff itself shows — no caller, test, or adjacent file was inspected. Treat an `approve` here as an opinion, not a completed review."
     });
   }
+  // The zero-evidence downgrade the SPEC asks for, as a field rather than as a
+  // status: a caller must be able to discard the verdict without parsing a
+  // warning string. It is deliberately separate from `outputState` — the run
+  // itself did complete, and folding this into the three-state classifier would
+  // make "the model produced no answer" and "the model answered without looking
+  // at anything" the same value, which is exactly what X2 is about telling apart.
+  const resultComplete = ok && !noEvidenceReview;
 
   const skillsLoaded = parsed.skillsLoaded ?? [];
   if (skillsLoaded.length > 0) {
@@ -391,6 +401,7 @@ async function executeJob({
     stopReason: parsed.stopReason ?? null,
     outputState: classification.state,
     outputStateReason: classification.reason,
+    resultComplete,
     toolEventCount: classification.toolEventCount,
     opencodeSessionId: parsed.sessionId ?? null,
     exitCode: outcome.exitCode,
@@ -568,6 +579,7 @@ async function commandTask(tokens) {
       jobId,
       outputState,
       outputStateReason: payload.outputStateReason,
+      resultComplete: payload.resultComplete,
       stopReason: payload.stopReason,
       toolEventCount: payload.toolEventCount,
       evidenceLevel: payload.evidenceLevel,
@@ -658,6 +670,7 @@ async function commandReview(tokens, { adversarial }) {
       ok,
       outputState,
       outputStateReason: payload.outputStateReason,
+      resultComplete: payload.resultComplete,
       stopReason: payload.stopReason,
       toolEventCount: payload.toolEventCount,
       evidenceLevel: payload.evidenceLevel,
