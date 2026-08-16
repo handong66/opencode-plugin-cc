@@ -37,6 +37,16 @@ function stderrBlock(stderrTail, lineCount) {
   return ["", "Most recent stderr:", "```", stderr.split(/\r?\n/).slice(-lineCount).join("\n"), "```"];
 }
 
+// Typed warnings sit above the raw stderr block: the tail explains *what*
+// opencode printed, this says what it means for the answer below.
+function warningBlock(warnings) {
+  const entries = Array.isArray(warnings) ? warnings.filter((warning) => warning?.message) : [];
+  if (entries.length === 0) {
+    return [];
+  }
+  return ["", "Warnings:", ...entries.map((warning) => `- ${warning.message}`)];
+}
+
 function footer(job) {
   const lines = [
     "",
@@ -53,7 +63,7 @@ function footer(job) {
 export function renderTaskOutput(job, payload) {
   const text = String(payload.rawOutput ?? "").trim();
   const body = text || "[opencode returned no final output]";
-  return [body, ...stderrBlock(payload.stderrTail, 5), footer(job)].join("\n");
+  return [body, ...warningBlock(payload.warnings), ...stderrBlock(payload.stderrTail, 5), footer(job)].join("\n");
 }
 
 const INCOMPLETE_REASON_DETAIL = {
@@ -77,6 +87,7 @@ export function renderIncompleteOutput(job, payload) {
   }
   lines.push("Partial output below — treat it as work-in-progress, not as the answer.");
   lines.push("", text || "[opencode produced no text]");
+  lines.push(...warningBlock(payload.warnings));
   lines.push(...stderrBlock(payload.stderrTail, 5));
 
   lines.push(
@@ -105,6 +116,7 @@ export function renderTaskFailure(job, payload) {
   if (payload.spawnError) {
     lines.push(`Spawn error: ${payload.spawnError}`);
   }
+  lines.push(...warningBlock(payload.warnings));
   lines.push(...stderrBlock(payload.stderrTail, 15));
   if (String(payload.rawOutput ?? "").trim()) {
     lines.push("", "Partial output:", String(payload.rawOutput).trim());
@@ -121,6 +133,7 @@ export function renderReviewOutput(job, payload) {
       "opencode returned review output that did not match the expected schema. Raw output below.",
       "",
       raw || "[empty output]",
+      ...warningBlock(payload.warnings),
       footer(job)
     ].join("\n");
   }
@@ -165,6 +178,7 @@ export function renderReviewOutput(job, payload) {
     }
   }
 
+  lines.push(...warningBlock(payload.warnings));
   lines.push(footer(job));
   return lines.join("\n");
 }

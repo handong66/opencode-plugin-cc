@@ -111,6 +111,37 @@ export function classifyOutcome({
   return { ...base, state: "completed", reason: null };
 }
 
+// opencode announces an auto-rejected permission on stderr and still exits 0,
+// e.g. `! permission requested: external_directory (/private/tmp/*);
+// auto-rejecting`. Claude Code stages large prompts and material under
+// /private/tmp/claude-501/<project>/<session>/scratchpad by default, so this is
+// a structural collision between the two conventions, not an edge case.
+const PERMISSION_REJECT_PATTERN = /permission requested:\s*([\w-]+)\s*\(([^)]*)\);\s*auto-rejecting/gi;
+
+export function detectPermissionWarnings(stderrTail, { cwd = null } = {}) {
+  const warnings = [];
+  const seen = new Set();
+  for (const match of String(stderrTail ?? "").matchAll(PERMISSION_REJECT_PATTERN)) {
+    const permission = match[1];
+    const target = match[2].trim();
+    const key = `${permission}:${target}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    warnings.push({
+      class: permission === "external_directory" ? "external_path_blocked" : "permission_blocked",
+      permission,
+      path: target,
+      message:
+        permission === "external_directory"
+          ? `external_path_blocked: opencode refused to read ${target} because it is outside ${cwd ?? "the working directory"}. Copy the file into the repo, or inline its contents in the prompt.`
+          : `permission_blocked: opencode auto-rejected the ${permission} permission for ${target}. Anything that needed it was skipped.`
+    });
+  }
+  return warnings;
+}
+
 export function getOpencodeAvailability() {
   const version = spawnSync("opencode", ["--version"], { encoding: "utf8" });
   if (version.error || version.status !== 0) {

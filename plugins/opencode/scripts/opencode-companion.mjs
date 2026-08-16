@@ -11,6 +11,7 @@ import { extractClaudeMessages, buildHandoffTranscript } from "./lib/claude-tran
 import { collectReviewInput } from "./lib/git.mjs";
 import {
   classifyOutcome,
+  detectPermissionWarnings,
   getOpencodeAvailability,
   parseEventStream,
   runOpencode
@@ -311,6 +312,12 @@ async function executeJob({
   for (const warning of classification.warnings) {
     process.stderr.write(`warning: ${warning}\n`);
   }
+  // Typed, actionable warnings derived from what opencode said on stderr while
+  // still exiting 0 — chiefly an auto-rejected read of a path outside the repo.
+  const warnings = detectPermissionWarnings(outcome.stderrTail, { cwd });
+  for (const warning of warnings) {
+    process.stderr.write(`warning: ${warning.message}\n`);
+  }
   const payload = {
     kind,
     rawOutput: parsed.text ?? "",
@@ -323,6 +330,7 @@ async function executeJob({
     exitCode: outcome.exitCode,
     spawnError: outcome.spawnError,
     stderrTail: outcome.stderrTail,
+    warnings,
     timedOut: Boolean(outcome.timedOut),
     timeoutMs,
     durationMs: outcome.durationMs
@@ -498,6 +506,7 @@ async function commandTask(tokens) {
       opencodeSessionId: payload.opencodeSessionId,
       exitCode: payload.exitCode,
       timedOut: payload.timedOut,
+      warnings: payload.warnings,
       stderrTail: ok ? undefined : payload.stderrTail
     });
   } else {
@@ -582,6 +591,7 @@ async function commandReview(tokens, { adversarial }) {
       outputStateReason: payload.outputStateReason,
       stopReason: payload.stopReason,
       toolEventCount: payload.toolEventCount,
+      warnings: payload.warnings,
       review: payload.structuredOutput,
       rawOutput: payload.rawOutput
     });
