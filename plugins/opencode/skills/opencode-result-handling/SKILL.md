@@ -37,6 +37,11 @@ Evidence behind a review verdict:
 - The helper prints a `no_evidence_review` warning in that case. Pass it on rather than dropping it.
 - The same judgement is machine-readable as `resultComplete` in `--json` and in the stored payload: it is `false` for a zero-evidence review and for any run that did not finish, `true` only when the run completed *and* the verdict has evidence behind it. Key off that field rather than re-deriving it; `outputState` still describes the run itself, so a zero-evidence review is `outputState: "completed"` with `resultComplete: false`.
 
+Feeding output to a script:
+- Use `/opencode:result <id> --json` (whole payload) or `--structured-only` (just the review JSON object; exits 1 with the reason when the run produced none). Both are exact.
+- Never slice the rendered text with `head -c` / `tail -c`. It breaks multi-byte characters and any JSON inside the payload — two recorded corruptions came from doing that while `--json` was available.
+- There is no output cap and no truncation flag, deliberately. This helper's contract is that its output is relayed verbatim; adding a lossy limit would contradict it. If the output is too large for a caller, narrow the channel (`--json`, `--structured-only`, a specific field), not the content.
+
 Job handles:
 - The first line of `task`/`review` stdout is the handle, printed before opencode starts: `Job: <id> (<kind>, running) — poll with /opencode:status <id>`. With `--json` the same handle is a JSON line on stderr (`{"jobId":…,"logFile":…,"pollWith":…}`) so stdout stays one JSON document.
 - Keep that id. It is the only handle for a run that was detached with `Bash(run_in_background: true)`, and it works while the run is still in flight: `status <id> --wait --timeout-ms <ms>` blocks until the job reaches a terminal state and `result <id> --wait` does the same and then prints the output. Never hand-roll a polling loop over the log file.

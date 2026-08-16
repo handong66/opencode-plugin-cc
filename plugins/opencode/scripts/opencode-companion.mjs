@@ -935,7 +935,7 @@ async function commandStatus(tokens) {
 async function commandResult(tokens) {
   const { flags, rest } = parseFlags(tokens, {
     valueFlags: ["--timeout-ms"],
-    booleanFlags: ["--json", "--wait"]
+    booleanFlags: ["--json", "--wait", "--structured-only"]
   });
   const cwd = process.cwd();
   warnAboutStateLocation(cwd);
@@ -987,9 +987,34 @@ async function commandResult(tokens) {
 
   if (flags.has("--json")) {
     printJson({ job, payload: { ...payload, rendered: undefined } });
-  } else {
-    print(payload.rendered ?? String(payload.rawOutput ?? "").trim() ?? "[no output stored]");
+    return;
   }
+
+  // The machine-readable review object on its own, for callers that would
+  // otherwise slice the rendered prose with `head -c` / `tail -c` — which
+  // breaks multi-byte characters and any JSON inside it (two recorded payload
+  // corruptions came from exactly that).
+  if (flags.has("--structured-only")) {
+    if (!payload.structuredOutput) {
+      const detail = Array.isArray(payload.structuredOutputErrors) && payload.structuredOutputErrors.length > 0
+        ? ` It did not match the review schema: ${payload.structuredOutputErrors.slice(0, 5).join("; ")}.`
+        : "";
+      print(
+        `Job ${job.id} (${job.kind}) has no structured output.${detail} Use /opencode:result ${job.id} for the rendered text, or --json for the whole payload.`
+      );
+      process.exitCode = 1;
+      return;
+    }
+    printJson(payload.structuredOutput);
+    return;
+  }
+
+  // `String(x).trim()` never returns null, so the `?? "[no output stored]"`
+  // that used to be here could not fire and an empty payload printed a blank
+  // line instead of saying it was empty.
+  const rendered = String(payload.rendered ?? "").trim();
+  const raw = String(payload.rawOutput ?? "").trim();
+  print(rendered || raw || `[no output stored for job ${job.id} (status: ${describeJobStatus(job)})]`);
 }
 
 function commandCancel(tokens) {
@@ -1210,7 +1235,12 @@ const SUBCOMMAND_HELP = {
     "  --wait                  block until the job reaches a terminal state, then print it",
     "  --timeout-ms <ms>       bound for --wait (default 900000)",
     "  --json                  the stored payload as JSON — use this to feed scripts,",
-    "                          never head -c/tail -c on the rendered text"
+    "                          never head -c/tail -c on the rendered text",
+    "  --structured-only       print only the review JSON object (exit 1 if there is none)",
+    "",
+    "There is no output size limit and no truncation flag: the rendered text is",
+    "meant to be relayed verbatim. Slicing it by bytes breaks multi-byte",
+    "characters and any embedded JSON — take --json or --structured-only instead."
   ],
   cancel: ["usage: opencode-companion cancel [job-id]", "", "With no id, cancels the newest running job in this repository."],
   "task-resume-candidate": [
@@ -1250,7 +1280,7 @@ function commandHelp(subcommand = null) {
       "  review [--base <ref>] [--scope auto|working-tree|branch] [--model <m>] [--variant <v>] [--timeout-ms <ms>] [--json]",
       "  adversarial-review [--base <ref>] [--scope ...] [--model <m>] [--timeout-ms <ms>] [focus text]",
       "  status [job-id] [--all] [--wait] [--timeout-ms <ms>] [--json]",
-      "  result [job-id] [--wait] [--timeout-ms <ms>] [--json]",
+      "  result [job-id] [--wait] [--timeout-ms <ms>] [--json|--structured-only]",
       "  cancel [job-id]",
       "  task-resume-candidate [--json]",
       "  transfer [--source <claude-jsonl>] [--model <provider/model>]",
