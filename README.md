@@ -100,6 +100,12 @@ The model line distinguishes what was observed from what was predicted: `Model: 
 
 Exit codes: `0` a real answer, `1` the run failed, `2` the run finished without producing one.
 
+### How long a run takes, and how to wait for one
+
+`/opencode:status <id> --wait --timeout-ms <ms>` blocks until a job reaches a terminal state and returns the moment it does, so a generous deadline costs nothing when the run is quick; `/opencode:status --all --json` reports every job's `elapsedMs` and `resultComplete` in a single call, which is enough to fence on several jobs at once.
+
+Budget the deadline against measured wall time rather than intuition: in the recorded corpus an opencode run finishes in a median of ~3 minutes, with a p90 near 5.5 minutes for read-only reviews on the `plan` agent — about 4x slower than the sibling Grok runtime. A 2-minute wait is below this runtime's median, and 16 of 19 recorded three-way aggregations ended up with an empty opencode slot whose answer arrived shortly after the decision had already been made. The same numbers are in `status --help`.
+
 ### Stop-time review gate
 
 `/opencode:setup --enable-review-gate` makes opencode review every Claude turn that edited code before Claude is allowed to stop, blocking with concrete findings when something still needs fixing. It runs a full opencode turn on every stop — enable it only while actively monitoring a session, and disable it with `/opencode:setup --disable-review-gate`.

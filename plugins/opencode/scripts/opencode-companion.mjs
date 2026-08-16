@@ -1448,7 +1448,16 @@ const SUBCOMMAND_HELP = {
     "  --all                   include jobs from other Claude sessions",
     "  --wait                  block until the job reaches a terminal state",
     "  --timeout-ms <ms>       bound for --wait (default 900000)",
-    "  --json                  machine-readable result on stdout"
+    "  --json                  machine-readable result on stdout",
+    "",
+    "How long to wait: measured on the recorded corpus, an opencode run finishes",
+    "in a median of ~3 minutes, with a p90 near 5.5 minutes for read-only reviews",
+    "on the plan agent — roughly 4x the sibling Grok runtime. A 2-minute deadline",
+    "is below this runtime's median, so budget above it: 16 of 19 recorded",
+    "three-way aggregations recorded an empty opencode slot whose answer arrived",
+    "shortly after the decision had been made. `--wait` returns as soon as the job",
+    "is terminal, so a generous --timeout-ms costs nothing when the run is quick.",
+    "`--all --json` gives every job's elapsedMs and resultComplete in one call."
   ],
   result: [
     "usage: opencode-companion result [job-id] [flags]",

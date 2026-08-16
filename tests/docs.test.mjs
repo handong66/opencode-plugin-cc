@@ -103,6 +103,27 @@ test("rescue docs keep --background as a Claude-side flag, not a companion flag"
   assert.doesNotMatch(skill, /opencode-companion\.mjs" task --background/);
 });
 
+// M7 / the repository's documentation ownership layers: a bundled SKILL.md
+// states contract facts (which call, which field, which code is retryable);
+// orchestration rhythm and budget advice belongs where the runtime owns it —
+// `--help` and the README. Both copies drifted apart the last time this was
+// only a convention.
+test("wall-time budgeting lives in --help and the README, not the bundled skill", () => {
+  const skill = readDoc("skills", "opencode-result-handling", "SKILL.md");
+  const runtime = readDoc("scripts", "opencode-companion.mjs");
+  const readme = fs.readFileSync(path.join(REPO_ROOT, "README.md"), "utf8");
+
+  for (const measurement of [/p90/i, /median/i, /16 of 19/]) {
+    assert.doesNotMatch(skill, measurement, "the skill must not carry scheduling statistics");
+    assert.match(runtime, measurement, "status --help must carry them instead");
+    assert.match(readme, measurement, "and so must the README");
+  }
+  // What the skill keeps: the primitive and the field semantics.
+  assert.match(skill, /status <id> --wait --timeout-ms <ms>/);
+  assert.match(skill, /`resultComplete: false`[^\n]*missing seat/);
+  assert.match(skill, /`status --help`[^\n]*README/, "the skill must point at the layer that owns the budget");
+});
+
 // The 0.2.0 notes described a stderr warning for focus text dropped by
 // `review` — behaviour PC6 removed inside the same batch, contradicted by a
 // sibling entry in the same section and absent from the runtime. A release note

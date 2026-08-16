@@ -51,11 +51,11 @@ Job handles:
 - The first line of `task`/`review` stdout is the handle, printed before opencode starts: `Job: <id> (<kind>, running) — poll with /opencode:status <id>`. With `--json` the same handle is a JSON line on stderr (`{"jobId":…,"logFile":…,"pollWith":…}`) so stdout stays one JSON document.
 - Keep that id. It is the only handle for a run that was detached with `Bash(run_in_background: true)`, and it works while the run is still in flight: `status <id> --wait --timeout-ms <ms>` blocks until the job reaches a terminal state and `result <id> --wait` does the same and then prints the output. Never hand-roll a polling loop over the log file.
 
-Waiting for an opencode seat in a multi-model panel:
-- `status <id> --wait --timeout-ms <ms>` is the fan-in primitive. Use it instead of `sleep` loops: it returns the moment the job reaches a terminal state, including when the job's process died, so waiting costs nothing extra.
-- Budget the wait against measured wall time rather than intuition. On the recorded corpus opencode finishes in a median of ~3 minutes, with a p90 near 5.5 minutes for read-only reviews on the plan agent; the sibling Grok runtime's median is about 4x faster. A 2-minute wait is below this runtime's median — an opencode seat that "returned nothing" is usually a seat that was not waited for. 16 of 19 recorded three-way aggregations had an empty opencode slot while the answer arrived a minute after the decision was made.
-- `status --all --json` gives every job's `elapsedMs` and `resultComplete` in one call, which is enough for a barrier over several jobs without one call per job.
+Waiting on a job (which call to use, and what its fields mean):
+- `status <id> --wait --timeout-ms <ms>` blocks until the job reaches a terminal state, including a job whose process died, and returns the moment it does. Prefer it to a `sleep`/poll loop, which cannot return early and cannot see a dead job.
+- `status --all --json` reports every job's `elapsedMs` and `resultComplete` in one call, so a barrier over several jobs does not need one call per job.
 - `resultComplete: false` on a finished job means "do not count this as an answer" (no final output, or a review with no evidence). Treat it as a missing seat, not as a vote.
+- How long to wait, and how to schedule around it, is not a contract fact and is not decided here: `status --help` and the plugin README carry the measured wall times to budget against.
 
 Incomplete runs (`outputState: incomplete`, job status `incomplete`, exit code 2):
 - The helper prints `opencode stopped before producing a final answer (...)` when opencode exited cleanly without an answer: no text at all, a stop reason that is not a finished turn (for example `tool-calls`), or one line of narration after a batch of tool calls.
