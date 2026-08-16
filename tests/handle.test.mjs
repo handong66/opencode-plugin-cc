@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import { execFileSync } from "node:child_process";
 import { test } from "node:test";
 
 import { makeFakeEnv, makeTempGitRepo, runCompanion } from "./helpers.mjs";
@@ -54,6 +56,36 @@ test("--json stays a single parseable document when there is nothing to resume",
   assert.equal(payload.outputState, "completed", "and the run itself still happened");
   assert.doesNotMatch(result.stdout, /No previous opencode session/, "the notice must not precede the JSON");
   assert.match(result.stderr, /No previous opencode session found for this repository/, "but it is still reported");
+});
+
+// The review half of the same family: an empty target printed a sentence and
+// exited 0, so a `--json` caller got neither a document to parse nor a code to
+// branch on — and a clean tree is the most benign thing a fan-in scheduler
+// asks about.
+test("review --json reports an empty target as JSON instead of a sentence", () => {
+  const fake = makeFakeEnv({ mode: "review-json" });
+  const cwd = makeTempGitRepo();
+  execFileSync("git", ["add", "-A"], { cwd });
+  execFileSync("git", ["commit", "--quiet", "-m", "clean"], { cwd });
+
+  const result = runCompanion(["review", "--json"], { env: fake.env, cwd });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, true, "an empty target is not a failure");
+  assert.equal(payload.isEmpty, true);
+  assert.equal(payload.outputState, "empty");
+  assert.equal(payload.review, null);
+  assert.equal(payload.resultComplete, false, "there is no verdict to count as an answer");
+  assert.match(payload.label, /uncommitted working tree changes/);
+  assert.equal(fs.existsSync(fake.argsFile), false, "and no model was paid to review nothing");
+
+  // Adversarial takes the same branch, and the human channel keeps its prose.
+  const adversarial = runCompanion(["adversarial-review", "--json"], { env: fake.env, cwd });
+  assert.equal(JSON.parse(adversarial.stdout).outputState, "empty");
+  const human = runCompanion(["review"], { env: fake.env, cwd });
+  assert.equal(human.status, 0, human.stdout + human.stderr);
+  assert.match(human.stdout, /Nothing to review: no changes found for/);
 });
 
 test("review announces its handle too", () => {

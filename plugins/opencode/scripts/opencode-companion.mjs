@@ -856,7 +856,32 @@ async function commandReview(tokens, { adversarial }) {
   }
 
   if (reviewInput.isEmpty) {
-    print(`Nothing to review: no changes found for ${reviewInput.label}.`);
+    // Nothing to review is not a failure, so the exit code stays 0 — which is
+    // exactly why the sentence alone was not enough for a caller under
+    // `--json`: no JSON document to parse and no field to branch on, on the
+    // most benign path a fan-in scheduler hits (a clean tree, a path filter
+    // that matched nothing). The document carries the same keys as a real
+    // review so a consumer can read `review` / `warnings` without a shape
+    // check, with `outputState: "empty"` and `isEmpty` as the branch.
+    if (asJson) {
+      printJson({
+        ok: true,
+        outputState: "empty",
+        outputStateReason: "nothing-to-review",
+        isEmpty: true,
+        label: reviewInput.label,
+        resultComplete: false,
+        failureClass: null,
+        stopReason: null,
+        toolEventCount: 0,
+        evidenceLevel: null,
+        warnings: [],
+        review: null,
+        rawOutput: ""
+      });
+    } else {
+      print(`Nothing to review: no changes found for ${reviewInput.label}.`);
+    }
     return;
   }
 
@@ -1422,7 +1447,8 @@ const SUBCOMMAND_HELP = {
     "  --scope auto|working-tree|branch   (staged-only / unstaged-only are rejected)",
     "  --model <provider/model>  override the model (leave unset to use opencode's default)",
     "  --variant <level>       reasoning variant",
-    "  --json                  machine-readable result on stdout",
+    "  --json                  machine-readable result on stdout; a target with no changes",
+    "                          in it is a JSON document too (outputState \"empty\", exit 0)",
     "  --timeout-ms <ms>       companion-side deadline for the run (default 900000)",
     ...EXECUTION_FLAG_NOTE,
     "",
@@ -1440,7 +1466,8 @@ const SUBCOMMAND_HELP = {
     "  --variant <level>       reasoning variant",
     "  --threat-model <text>   the boundary to judge findings against; findings outside",
     "                          it are labelled out-of-model and cannot block",
-    "  --json                  machine-readable result on stdout",
+    "  --json                  machine-readable result on stdout; a target with no changes",
+    "                          in it is a JSON document too (outputState \"empty\", exit 0)",
     "  --timeout-ms <ms>       companion-side deadline for the run (default 900000)",
     ...EXECUTION_FLAG_NOTE,
     "",

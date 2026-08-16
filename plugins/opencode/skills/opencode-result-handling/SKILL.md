@@ -41,6 +41,8 @@ Feeding output to a script:
 - Use `/opencode:result <id> --json` (whole payload) or `--structured-only` (just the review JSON object; exits 1 with the reason when the run produced none). Both are exact.
 - Never slice the rendered text with `head -c` / `tail -c`. It breaks multi-byte characters and any JSON inside the payload — two recorded corruptions came from doing that while `--json` was available.
 - There is no output cap and no truncation flag, deliberately. This helper's contract is that its output is relayed verbatim; adding a lossy limit would contradict it. If the output is too large for a caller, narrow the channel (`--json`, `--structured-only`, a specific field), not the content.
+- With `--json`, stdout is one JSON document and nothing else. Everything a run says on the way — the job handle, which session `--resume-last` picked, the notice that there was none — goes to stderr, so `JSON.parse(stdout)` is always safe.
+- A review whose target has no changes returns `outputState: "empty"` (`isEmpty: true`, `outputStateReason: "nothing-to-review"`, `review: null`, exit code 0). It is not a verdict and not a failure: report that there was nothing to review rather than presenting it as an approval, and do not re-run it hoping for a different answer.
 
 Threat-model labels on adversarial reviews:
 - `/opencode:adversarial-review --threat-model "<boundary>"` states what the system is exposed to. Without it the reviewer assumes a single-user local application with no network exposure.
