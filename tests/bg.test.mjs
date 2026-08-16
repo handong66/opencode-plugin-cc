@@ -269,3 +269,31 @@ test("status and result reject flags that lost their value instead of blocking",
   assert.equal(mistypedResult.status, 1);
   assert.match(mistypedResult.stdout + mistypedResult.stderr, /Unknown flag: --strucutred-only/);
 });
+
+// The last member of that family. `transfer` read `flags` and dropped `errors`
+// and `unknownFlags` on the floor, so `--source` with no value fell through to
+// the transcript the SessionStart hook exported — handing off *a* session, just
+// not the one the caller named — and a mistyped flag was ignored entirely.
+test("transfer rejects the arguments it could not parse", () => {
+  const fake = makeFakeEnv({ extra: { OPENCODE_COMPANION_TRANSCRIPT_PATH: "/nonexistent/fallback.jsonl" } });
+  const cwd = makeTempGitRepo();
+
+  const valueless = runCompanion(["transfer", "--source"], { env: fake.env, cwd });
+  const valuelessOutput = valueless.stdout + valueless.stderr;
+  assert.equal(valueless.status, 1, valuelessOutput);
+  assert.match(valuelessOutput, /Invalid arguments: --source requires a value/);
+  assert.doesNotMatch(
+    valuelessOutput,
+    /fallback\.jsonl/,
+    "a --source that lost its value must not fall back to the exported transcript"
+  );
+
+  const mistyped = runCompanion(["transfer", "--sorce", "/tmp/whatever.jsonl"], { env: fake.env, cwd });
+  const mistypedOutput = mistyped.stdout + mistyped.stderr;
+  assert.equal(mistyped.status, 1, mistypedOutput);
+  assert.match(mistypedOutput, /Unknown flag: --sorce/);
+
+  // Neither form may reach opencode: the fixture records its argv only when it
+  // is actually spawned.
+  assert.equal(fs.existsSync(fake.argsFile), false, "a rejected transfer must not start a run");
+});

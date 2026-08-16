@@ -1393,7 +1393,19 @@ function commandTaskResumeCandidate(tokens) {
 // the transcript into a handoff prompt and seeds a fresh opencode session with
 // it. That costs one model turn; the reply is a short state summary.
 async function commandTransfer(tokens) {
-  const { flags } = parseFlags(tokens, { valueFlags: ["--source", "--model"] });
+  const { flags, errors, unknownFlags } = parseFlags(tokens, { valueFlags: ["--source", "--model"] });
+  // The last caller that read `flags` and threw the parse problems away. A
+  // `--source` that lost its value read as unset and fell through to the
+  // transcript the SessionStart hook exported, so the handoff ran — against a
+  // different session than the one the caller named.
+  if (
+    rejectsFlagProblems(
+      { errors, unknownFlags },
+      { command: "transfer", supported: "--source <claude-jsonl>, --model <provider/model>" }
+    )
+  ) {
+    return;
+  }
   if (!requireOpencodeReady({ asJson: false })) {
     return;
   }
