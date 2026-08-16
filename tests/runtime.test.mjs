@@ -4,7 +4,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 
-import { REPO_ROOT, makeFakeEnv, makeTempGitRepo, readRunArgs, runCompanion } from "./helpers.mjs";
+import { REPO_ROOT, makeFakeEnv, makeTempDir, makeTempGitRepo, readRunArgs, runCompanion } from "./helpers.mjs";
 
 const STATE_MODULE = path.join(REPO_ROOT, "plugins", "opencode", "scripts", "lib", "state.mjs");
 
@@ -259,4 +259,52 @@ test("silent runs (no events) are treated as failures", () => {
   const result = runCompanion(["task", "--json", "--write", "quiet"], { env: fake.env, cwd: makeTempGitRepo() });
   assert.equal(result.status, 1);
   assert.equal(JSON.parse(result.stdout).ok, false);
+});
+
+// PC9/X5 warns when a newer copy of the plugin sits next to the running one:
+// an orchestrator that hard-coded `.../opencode/0.1.0/scripts/...` ran a stale
+// copy for 3.5 hours. The warning shipped with no test at all, and it is the
+// kind of code that only ever runs on a user's machine — three path segments
+// of `..` and a version comparison, in a layout the test suite never builds.
+function stageVersionedInstall(versions, running) {
+  const cache = makeTempDir("opencode-versioned-cache");
+  const source = path.join(REPO_ROOT, "plugins", "opencode");
+  const staged = path.join(cache, running, "plugins", "opencode");
+  fs.mkdirSync(path.join(staged, "scripts"), { recursive: true });
+  // The entry point must be a real file: Node resolves an entry symlink, and
+  // the whole check hangs off `import.meta.url`. Everything it reads can be
+  // linked back to the checkout.
+  fs.copyFileSync(
+    path.join(source, "scripts", "opencode-companion.mjs"),
+    path.join(staged, "scripts", "opencode-companion.mjs")
+  );
+  fs.symlinkSync(path.join(source, "scripts", "lib"), path.join(staged, "scripts", "lib"));
+  for (const name of ["prompts", "schemas", ".claude-plugin"]) {
+    fs.symlinkSync(path.join(source, name), path.join(staged, name));
+  }
+  for (const version of versions) {
+    fs.mkdirSync(path.join(cache, version), { recursive: true });
+  }
+  return path.join(staged, "scripts", "opencode-companion.mjs");
+}
+
+test("a newer install sitting next to the running one is named on stderr", () => {
+  const fake = makeFakeEnv();
+  const entry = stageVersionedInstall(["0.2.0", "0.2.1", "0.3.0"], "0.2.0");
+
+  const result = spawnSync(process.execPath, [entry, "--help"], { env: fake.env, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /a newer install of this plugin exists \(0\.3\.0\)/, "the highest one, by version");
+  assert.match(result.stderr, /you are running 0\.2\.0 from /);
+  assert.match(result.stderr, /OPENCODE_COMPANION_BIN/, "and it must say what to use instead");
+  // A warning, not a replacement: the help the caller asked for is still there.
+  assert.match(result.stdout, /^opencode-companion 0\.2\.0 —/);
+
+  // Only *newer* counts, and an unversioned checkout has nothing to compare.
+  const newest = stageVersionedInstall(["0.1.0", "0.2.0"], "0.2.0");
+  const quiet = spawnSync(process.execPath, [newest, "--help"], { env: fake.env, encoding: "utf8" });
+  assert.equal(quiet.status, 0, quiet.stderr);
+  assert.doesNotMatch(quiet.stderr, /newer install/);
+  const inPlace = runCompanion(["--help"], { env: fake.env, cwd: makeTempGitRepo() });
+  assert.doesNotMatch(inPlace.stderr, /newer install/, "this checkout is not a versioned install");
 });

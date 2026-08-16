@@ -198,6 +198,8 @@ function describeNewerInstall() {
   } catch {
     return null;
   }
+  // Highest sibling wins: naming 0.2.1 while 0.3.0 is also installed would send
+  // the reader to a copy that is itself out of date.
   const newer = siblings
     .filter((entry) => /^\d+\.\d+/.test(entry) && compareVersions(entry, version) > 0)
     .sort(compareVersions)
