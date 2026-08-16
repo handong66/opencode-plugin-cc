@@ -71,6 +71,39 @@ test("loading an interactive skill is counted and warned about", () => {
   assert.deepEqual(JSON.parse(quiet.stdout).warnings, [], "a clean run must not warn");
 });
 
+// X2: 30 of 64 recorded "succeeded" review jobs opened no file at all, and the
+// orchestrator counted those verdicts as votes. Here the diff is inlined in the
+// prompt, so 0 tool calls is not automatically ungrounded — but it does mean
+// nothing outside the diff was inspected, and the verdict must say so.
+test("a review verdict carries the evidence behind it", () => {
+  const fake = makeFakeEnv({ mode: "review-json" });
+  const cwd = makeTempGitRepo();
+
+  const result = runCompanion(["review"], { env: fake.env, cwd });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Verdict: NEEDS ATTENTION \(evidence: none\)/);
+  assert.match(result.stdout, /no_evidence_review: this verdict was produced with 0 tool calls/);
+  assert.match(result.stdout, /opinion, not a completed review/);
+
+  const withEvidence = makeFakeEnv({ mode: "review-json", extra: { OPENCODE_FAKE_TOOLS: "4" } });
+  const json = runCompanion(["review", "--json"], { env: withEvidence.env, cwd: makeTempGitRepo() });
+  const payload = JSON.parse(json.stdout);
+  assert.equal(payload.evidenceLevel, "substantive");
+  assert.equal(payload.toolEventCount, 4);
+  assert.deepEqual(payload.warnings, [], "a review that did work must not be flagged");
+});
+
+test("a task run is never flagged for a missing review evidence trail", () => {
+  const fake = makeFakeEnv({ extra: { OPENCODE_FAKE_TEXT: "answer" } });
+  const result = runCompanion(["task", "--json", "--write", "answer this"], {
+    env: fake.env,
+    cwd: makeTempGitRepo()
+  });
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.evidenceLevel, "none");
+  assert.deepEqual(payload.warnings, []);
+});
+
 test("detectPermissionWarnings dedupes and names the working directory", () => {
   const warnings = detectPermissionWarnings(`${REJECTION_LINE}\n${REJECTION_LINE}\n`, { cwd: "/repo" });
   assert.equal(warnings.length, 1);

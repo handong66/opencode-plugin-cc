@@ -62,6 +62,7 @@ Every finding must include:
 - a confidence score from 0 to 1
 - a concrete recommendation
 Write the summary like a terse ship/no-ship assessment, not a neutral recap.
+If you return `approve`, the summary must state what you actually inspected (which files, diffs, or commands) so the verdict can be weighed. An approval with no evidence behind it is treated as no signal, not as a pass.
 </structured_output_contract>
 
 <grounding_rules>

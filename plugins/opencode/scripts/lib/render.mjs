@@ -140,7 +140,7 @@ export function renderReviewOutput(job, payload) {
 
   const lines = [];
   const verdict = review.verdict === "approve" ? "APPROVE" : "NEEDS ATTENTION";
-  lines.push(`Verdict: ${verdict}`);
+  lines.push(`Verdict: ${verdict}${payload.evidenceLevel ? ` (evidence: ${payload.evidenceLevel})` : ""}`);
   lines.push("");
   lines.push(String(review.summary ?? "").trim());
 

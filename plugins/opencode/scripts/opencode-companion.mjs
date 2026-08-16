@@ -318,6 +318,19 @@ async function executeJob({
   // X1: a headless delegate that opens by loading an interactive skill spends
   // turns and wall time on it before any of the requested work happens. The
   // prompt preamble forbids it; this makes a preamble that did not take visible.
+  // X2: how much work stood behind the verdict. In this plugin the diff is
+  // inlined into the review prompt, so 0 tool calls is not automatically an
+  // ungrounded review — but it does mean nothing outside the diff was looked at.
+  const evidenceLevel =
+    classification.toolEventCount === 0 ? "none" : classification.toolEventCount <= 2 ? "thin" : "substantive";
+  if ((kind === "review" || kind === "adversarial-review") && evidenceLevel === "none") {
+    warnings.push({
+      class: "no_evidence_review",
+      message:
+        "no_evidence_review: this verdict was produced with 0 tool calls. The diff was inlined in the prompt, so the verdict can only be defended for what the diff itself shows — no caller, test, or adjacent file was inspected. Treat an `approve` here as an opinion, not a completed review."
+    });
+  }
+
   const skillsLoaded = parsed.skillsLoaded ?? [];
   if (skillsLoaded.length > 0) {
     warnings.push({
@@ -343,6 +356,7 @@ async function executeJob({
     stderrTail: outcome.stderrTail,
     warnings,
     skillsLoaded,
+    evidenceLevel,
     timedOut: Boolean(outcome.timedOut),
     timeoutMs,
     durationMs: outcome.durationMs
@@ -514,6 +528,7 @@ async function commandTask(tokens) {
       outputStateReason: payload.outputStateReason,
       stopReason: payload.stopReason,
       toolEventCount: payload.toolEventCount,
+      evidenceLevel: payload.evidenceLevel,
       rawOutput: payload.rawOutput,
       opencodeSessionId: payload.opencodeSessionId,
       exitCode: payload.exitCode,
@@ -603,6 +618,7 @@ async function commandReview(tokens, { adversarial }) {
       outputStateReason: payload.outputStateReason,
       stopReason: payload.stopReason,
       toolEventCount: payload.toolEventCount,
+      evidenceLevel: payload.evidenceLevel,
       warnings: payload.warnings,
       review: payload.structuredOutput,
       rawOutput: payload.rawOutput

@@ -177,6 +177,22 @@ if (args[0] === "run") {
     });
   }
 
+  // Generic tool activity, so a review can be exercised with real evidence.
+  const toolCount = Number(process.env.OPENCODE_FAKE_TOOLS ?? 0);
+  for (let index = 0; index < toolCount; index += 1) {
+    emit({
+      type: "tool",
+      ...base,
+      part: {
+        id: `prt_generic${index}`,
+        messageID: "msg_fake0123456789",
+        sessionID: "ses_fake0123456789",
+        tool: "read",
+        state: { status: "completed", input: { filePath: `src/file-${index}.mjs` } }
+      }
+    });
+  }
+
   if (mode === "review-json") {
     const review = {
       verdict: "needs-attention",

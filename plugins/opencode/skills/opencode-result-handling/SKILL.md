@@ -21,6 +21,11 @@ When the helper returns opencode output:
 - CRITICAL: After presenting review findings, STOP. Do not make any code changes. Do not fix any issues. You MUST explicitly ask the user which issues, if any, they want fixed before touching a single file. Auto-applying fixes from a review is strictly forbidden, even if the fix is obvious.
 - If the helper reports malformed output or a failed opencode run, include the most actionable stderr lines and stop there instead of guessing.
 
+Evidence behind a review verdict:
+- `review` / `adversarial-review` report `evidenceLevel` (`none` | `thin` | `substantive`) next to the verdict and in `--json`. It is derived from how many tool calls the run made.
+- `evidenceLevel: none` means the reviewer looked at nothing beyond the diff that was inlined into its prompt. Present such a verdict as what it is: an opinion on the diff text. An `approve` with no evidence is **no signal** — do not count it as a passing vote, and never report it to the user as "opencode approved the change" without that qualification.
+- The helper prints a `no_evidence_review` warning in that case. Pass it on rather than dropping it.
+
 Job handles:
 - The first line of `task`/`review` stdout is the handle, printed before opencode starts: `Job: <id> (<kind>, running) — poll with /opencode:status <id>`. With `--json` the same handle is a JSON line on stderr (`{"jobId":…,"logFile":…,"pollWith":…}`) so stdout stays one JSON document.
 - Keep that id. It is the only handle for a run that was detached with `Bash(run_in_background: true)`, and it works while the run is still in flight: `status <id> --wait --timeout-ms <ms>` blocks until the job reaches a terminal state and `result <id> --wait` does the same and then prints the output. Never hand-roll a polling loop over the log file.
