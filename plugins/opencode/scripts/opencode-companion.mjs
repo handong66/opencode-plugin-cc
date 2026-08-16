@@ -1608,12 +1608,23 @@ const SUBCOMMAND_HELP = {
   ]
 };
 
+// A bare `SUBCOMMAND_HELP[subcommand]` answers for every inherited
+// `Object.prototype` name, so `constructor --help` found the Object constructor
+// — truthy, therefore treated as a help page, therefore spread into an array:
+// `TypeError: perCommand is not iterable` and a stack trace, in response to a
+// typo. Own keys only; anything else is an unknown subcommand.
+function subcommandHelp(subcommand) {
+  return typeof subcommand === "string" && Object.hasOwn(SUBCOMMAND_HELP, subcommand)
+    ? SUBCOMMAND_HELP[subcommand]
+    : null;
+}
+
 function commandHelp(subcommand = null) {
   const outdated = describeNewerInstall();
   if (outdated) {
     process.stderr.write(`warning: ${outdated}\n`);
   }
-  const perCommand = SUBCOMMAND_HELP[subcommand];
+  const perCommand = subcommandHelp(subcommand);
   if (perCommand) {
     print(
       [`opencode-companion ${subcommand} (plugin ${pluginVersion() ?? "unknown"})`, "", ...perCommand].join("\n")
@@ -1682,7 +1693,7 @@ async function main() {
 
   // Before dispatch: the switch below only sees argv[2], so `task --help` used
   // to reach `commandTask` and be forwarded to the model as the prompt.
-  if (SUBCOMMAND_HELP[subcommand] && wantsHelp(tokens)) {
+  if (subcommandHelp(subcommand) && wantsHelp(tokens)) {
     return commandHelp(subcommand);
   }
 

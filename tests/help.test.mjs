@@ -47,6 +47,29 @@ test("every known subcommand answers -h with its own flags", () => {
   assert.equal(fs.existsSync(fake.argsFile), false, "help must never spawn opencode");
 });
 
+// `SUBCOMMAND_HELP[subcommand]` was a bare property read on an object literal,
+// so any inherited `Object.prototype` name answered it: `constructor --help`
+// found the Object constructor, passed the truthiness test that gates the help
+// intercept, and was then spread into an array — `TypeError: perCommand is not
+// iterable`, plus a stack trace, for a typo.
+test("a subcommand named after an Object.prototype member does not crash", () => {
+  const fake = makeFakeEnv();
+  const cwd = makeTempGitRepo();
+
+  for (const subcommand of ["constructor", "toString", "valueOf", "hasOwnProperty", "__proto__"]) {
+    for (const argv of [[subcommand, "--help"], [subcommand, "-h"], [subcommand]]) {
+      const result = runCompanion(argv, { env: fake.env, cwd });
+      const output = result.stdout + result.stderr;
+      assert.equal(result.status, 0, `${argv.join(" ")}: ${output}`);
+      assert.doesNotMatch(output, /TypeError|not iterable|\bat main\b/, `${argv.join(" ")} must not throw`);
+      // An unknown subcommand answers with the top-level help, whatever it is
+      // named.
+      assert.match(result.stdout, /Subcommands \(run `<subcommand> --help` for its flags\):/, argv.join(" "));
+    }
+  }
+  assert.equal(fs.existsSync(fake.argsFile), false, "an unknown subcommand must never spawn opencode");
+});
+
 test("the top-level help still lists every subcommand", () => {
   const fake = makeFakeEnv();
   const result = runCompanion(["--help"], { env: fake.env, cwd: makeTempGitRepo() });
