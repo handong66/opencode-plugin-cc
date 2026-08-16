@@ -20,8 +20,30 @@ Selection guidance:
 Forwarding rules:
 
 - Use exactly one `Bash` call to invoke `node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task ...`.
-- If the user did not explicitly choose `--background` or `--wait`, prefer foreground for a small, clearly bounded rescue request.
-- If the user did not explicitly choose `--background` or `--wait` and the task looks complicated, open-ended, multi-step, or likely to keep opencode running for a long time, prefer background execution.
+- Foreground template — always set the timeout explicitly:
+
+  ```
+  Bash({
+    command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task --write "<task text>"',
+    timeout: 600000,
+    description: "Delegate the rescue request to opencode"
+  })
+  ```
+
+- Background template — for long or open-ended work:
+
+  ```
+  Bash({
+    command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task --write "<task text>"',
+    run_in_background: true,
+    description: "Delegate the rescue request to opencode in the background"
+  })
+  ```
+
+- opencode runs regularly take longer than two minutes, so the 120000 ms Bash default kills a large share of them with `Exit code 143`. `timeout: 600000` is mandatory on every foreground call.
+- `timeout` and `run_in_background` are `Bash` parameters, not companion flags; never put them on the companion command line.
+- If the user did not explicitly choose `--background` or `--wait`, prefer the foreground template for a small, clearly bounded rescue request.
+- If the user did not explicitly choose `--background` or `--wait` and the task looks complicated, open-ended, multi-step, or likely to keep opencode running for a long time, prefer the background template.
 - You may use the `opencode-prompting` skill only to tighten the user's request into a better opencode prompt before forwarding it.
 - Do not use that skill to inspect the repository, reason through the problem yourself, draft a solution, or do any independent work beyond shaping the forwarded prompt text.
 - Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own.

@@ -11,6 +11,31 @@ Use this skill only inside the `opencode:opencode-rescue` subagent.
 Primary helper:
 - `node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task "<raw arguments>"`
 
+Invocation template (always set the Bash timeout explicitly):
+
+```
+Bash({
+  command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task "<raw arguments>"',
+  timeout: 600000,
+  description: "Delegate the rescue request to opencode"
+})
+```
+
+For a long or open-ended rescue, detach instead of waiting:
+
+```
+Bash({
+  command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task "<raw arguments>"',
+  run_in_background: true,
+  description: "Delegate the rescue request to opencode in the background"
+})
+```
+
+Timeout rules:
+- opencode runs regularly take longer than two minutes (typical 2-6 minutes for read-only reviews on the plan agent), so the Claude Code default of 120000 ms cuts a large share of them off mid-run with `Exit code 143`.
+- Always pass `timeout: 600000` on a foreground `task` call. Never rely on the default.
+- `timeout` and `run_in_background` are Claude Code `Bash` parameters. They are never companion flags and must not appear in the companion command line.
+
 Execution rules:
 - The rescue subagent is a forwarder, not an orchestrator. Its only job is to invoke `task` once and return that stdout unchanged.
 - Prefer the helper over hand-rolled `git`, direct opencode CLI strings, or any other Bash activity.

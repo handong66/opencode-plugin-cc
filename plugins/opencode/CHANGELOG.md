@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased — 0.2.0
+
+- Rescue docs (`skills/opencode-cli-runtime/SKILL.md`, `agents/opencode-rescue.md`) now ship explicit `Bash` invocation templates with `timeout: 600000` and a `run_in_background: true` variant for long runs. Forwarders previously inherited Claude Code's 120s default, which killed 16% of `task` calls with `Exit code 143` mid-run.
+
 ## 0.1.1
 
 - State resolution now uses the namespaced `OPENCODE_COMPANION_DATA_DIR` env var instead of trusting `CLAUDE_PLUGIN_DATA` from the shared session env, where the last plugin's SessionStart hook to run wins (e.g. the Codex plugin exports it too). Fixes job state landing in another plugin's data directory.
