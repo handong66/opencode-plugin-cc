@@ -112,7 +112,7 @@ Budget the deadline against measured wall time rather than intuition: in the rec
 
 Three deliberate limits keep it from trapping you in a session you cannot leave:
 
-- **It fails open.** Only an explicit `BLOCK:` verdict blocks. If the review itself cannot complete — no output, non-zero exit, unparseable answer, timeout — the stop is allowed and the reason is printed on stderr. Run `/opencode:review --wait` by hand when you see that.
+- **It fails open.** Only an explicit `BLOCK:` verdict blocks, read from the review's own payload rather than from its exit status (a reviewer that reads the repo before deciding reports itself as incomplete, and that must not swallow a real block). If the review itself cannot complete — it could not be started, the deadline passed, no document to parse, no output, an answer in an unrecognised format — the stop is allowed and the reason is printed on stderr. Run `/opencode:review --wait` by hand when you see that.
 - **It stands down after two consecutive blocks** in one session and tells you to fix the findings or disable it.
 - **It skips the review entirely** when the working tree is clean and HEAD has not moved since the last stop, instead of paying for a model turn to be told there is nothing to review.
 

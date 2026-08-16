@@ -7,7 +7,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { collectReviewInput } from "./lib/git.mjs";
-import { getOpencodeAvailability } from "./lib/opencodecli.mjs";
+import { getOpencodeAvailability, MIN_ANSWER_CHARS_ENV } from "./lib/opencodecli.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import { READY_ENV, SESSION_ID_ENV } from "./lib/session-env.mjs";
 import { getConfig, listJobs, resolveStateFile, setConfig } from "./lib/state.mjs";
@@ -86,6 +86,11 @@ function runStopReview(cwd, input = {}, { availabilityChecked = false } = {}) {
   const childEnv = {
     ...process.env,
     ...(input.session_id ? { [SESSION_ID_ENV]: input.session_id } : {}),
+    // The gate's contract asks for one short line (`ALLOW:`/`BLOCK: <reason>`),
+    // so the generic "a one-liner after tool calls is narration, not an answer"
+    // heuristic is wrong for exactly this child: it turned every real verdict
+    // from a reviewer that read the repo into `incomplete`.
+    [MIN_ANSWER_CHARS_ENV]: "0",
     // The hook has already paid for `opencode --version` + `opencode auth list`
     // (~1.1s measured); the child would otherwise run the same two probes.
     ...(availabilityChecked ? { [READY_ENV]: "1" } : {})
@@ -103,25 +108,46 @@ function runStopReview(cwd, input = {}, { availabilityChecked = false } = {}) {
       reason: `the review task did not finish within ${Math.round(STOP_REVIEW_TIMEOUT_MS / 60000)} minutes`
     };
   }
+  if (result.error) {
+    return { verdict: "error", reason: `the review task could not be started (${result.error.message})` };
+  }
 
-  if (result.status !== 0) {
+  const describeExit = () => {
     const detail = String(result.stderr || result.stdout || "")
       .trim()
       .split(/\r?\n/)
       .filter(Boolean)
       .at(-1);
-    return {
-      verdict: "error",
-      reason: detail ? `the review task exited ${result.status}: ${detail}` : `the review task exited ${result.status}`
-    };
+    return detail
+      ? `the review task exited ${result.status}: ${detail}`
+      : `the review task exited ${result.status}`;
+  };
+
+  // The verdict lives in the payload, not in the exit status. `task` exits 2
+  // whenever the run ended without what *it* considers a complete answer, and
+  // a blacklisted `stopReason` (`tool-calls`) alone is enough to get there — so
+  // reading the status first meant the reviewer could say `BLOCK: <reason>`,
+  // have it sitting in `rawOutput`, and still be reported as "the gate could
+  // not run". Infrastructure failure now means what it says: no spawn, no
+  // deadline, no parseable document, or an answer this contract cannot read.
+  let payload = null;
+  try {
+    payload = JSON.parse(result.stdout);
+  } catch {
+    payload = null;
+  }
+  if (payload && typeof payload === "object") {
+    const review = parseStopReviewOutput(payload.rawOutput);
+    if (review.verdict !== "error" || result.status === 0) {
+      return review;
+    }
+    return { verdict: "error", reason: `${review.reason} (${describeExit()})` };
   }
 
-  try {
-    const payload = JSON.parse(result.stdout);
-    return parseStopReviewOutput(payload?.rawOutput);
-  } catch {
-    return { verdict: "error", reason: "the review task returned invalid JSON" };
+  if (result.status !== 0) {
+    return { verdict: "error", reason: describeExit() };
   }
+  return { verdict: "error", reason: "the review task returned invalid JSON" };
 }
 
 function filterJobsForCurrentSession(jobs, input = {}) {

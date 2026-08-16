@@ -5,6 +5,8 @@
 //   OPENCODE_FAKE_MODE       success (default) | review-json | fail | silent
 //                            | empty-text | narration | hang
 //   OPENCODE_FAKE_TEXT       final answer text for success mode
+//   OPENCODE_FAKE_STOP_REASON  reason on the closing step_finish (default `stop`),
+//                            e.g. `tool-calls` for a run that stopped mid-work
 //   OPENCODE_FAKE_STDERR     written to stderr before the run still exits 0
 //   OPENCODE_FAKE_ARGS_FILE  when set, argv is dumped there as JSON
 //   OPENCODE_FAKE_OBSERVED_MODEL  provider/model reported on the assistant
@@ -270,7 +272,10 @@ if (args[0] === "run") {
     ...base,
     part: {
       id: "prt_finish1",
-      reason: "stop",
+      // A run can hand back a usable final answer and still close on a reason
+      // the companion blacklists (`tool-calls` is the observed one), so the
+      // reason is steerable independently of the text.
+      reason: process.env.OPENCODE_FAKE_STOP_REASON || "stop",
       messageID,
       sessionID,
       type: "step-finish",
