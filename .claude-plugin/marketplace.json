@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "opencode plugins to use in Claude Code for delegation and code review.",
-    "version": "0.1.1"
+    "version": "0.2.0"
   },
   "plugins": [
     {
       "name": "opencode",
       "description": "Use opencode from Claude Code to review code or delegate tasks.",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "author": {
         "name": "domo"
       },

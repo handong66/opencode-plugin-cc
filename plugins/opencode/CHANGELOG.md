@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — 0.2.0
+## 0.2.0
 
 - `setup` reports leftover `.opencode-plugin-codex` / `.grok-plugin-codex` / `.opencode-plugin-cc` directories in the working tree (in `--json` as `legacyStateDirs`) and says they are safe to delete. These are 0.1-era job stores written into the user's own repository — the user asked for them to be gitignored at the time, one was still present a month later, and a sibling project's lint run failed on it. They are reported, never deleted: this is the user's working tree.
 - The review target selector now covers what callers actually ask for. `--base` accepts a plain ref *or* a range written as `A..B` / `A...B`; `--head <ref>` moves the other end (default HEAD); `--paths <glob,...>` (alias `--files`) limits the review to a file set; free focus text is accepted by `review` as well as `adversarial-review` instead of being dropped; and `--rubric-file <path>` supplies the caller's own severity vocabulary while the JSON schema stays fixed. `review` and `adversarial-review` were used **zero** times in two months of recorded use while every real request was a commit range plus a document set — `git diff 71dcdc5..HEAD`, "the documents under docs/, committed" — which the old `working tree | <base>...HEAD` selector could not express, so callers rebuilt reviews in ad-hoc prompts and got mutually incompatible output shapes. Input truncation is also a `review_input_truncated` warning now, carrying the real and truncated sizes, instead of a sentence inside the prompt that only the model saw.

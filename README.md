@@ -8,8 +8,8 @@ Project write-up: [han-dong.link/en/work/opencode-plugin-cc](https://han-dong.li
 
 ## What You Get
 
-- `/opencode:review` — a read-only opencode code review of your local git changes, with structured findings
-- `/opencode:adversarial-review` — a steerable challenge review that attacks the design and assumptions
+- `/opencode:review` — a read-only opencode code review of local git changes, a commit range, or a file set, with structured findings
+- `/opencode:adversarial-review` — a steerable challenge review that questions the design and its assumptions, bounded by a threat model you state
 - `/opencode:rescue` — delegate investigation, debugging, or a full implementation task to opencode (write-capable by default, resumable)
 - `/opencode:transfer` — hand this Claude Code session off into a resumable opencode session
 - `/opencode:status`, `/opencode:result`, `/opencode:cancel` — manage background jobs
@@ -66,11 +66,12 @@ If opencode has no stored credentials yet, run:
 # Read-only review of uncommitted changes (structured verdict + findings)
 /opencode:review
 
-# Review the branch against a base ref
+# Review a commit range, or just part of one; trailing text steers the focus
 /opencode:review --base main
+/opencode:review --base 71dcdc5..HEAD --paths docs,src check the migration order
 
-# Challenge the design; extra text steers the focus
-/opencode:adversarial-review is the retry logic safe under concurrent writers?
+# Challenge the design, with the system's actual exposure stated up front
+/opencode:adversarial-review --threat-model "single-user local tool, no network exposure" is the retry logic safe under concurrent writers?
 
 # Delegate a task (write-capable by default; picks your opencode default model)
 /opencode:rescue figure out why the login test is flaky and fix it
@@ -81,29 +82,40 @@ If opencode has no stored credentials yet, run:
 # Continue the previous opencode session
 /opencode:rescue --resume apply the top fix
 
-# Background jobs
+# Long jobs: Claude Code detaches them, the companion always runs in the foreground
 /opencode:rescue --background port the parser to TypeScript
-/opencode:status
-/opencode:result
-/opencode:cancel
+/opencode:status                 # every job, with elapsed time
+/opencode:status <id> --wait     # block until this one finishes
+/opencode:result <id>            # the stored output, verbatim
+/opencode:result <id> --json     # the same thing for a script
+/opencode:cancel <id>
 
 # Hand this session off to opencode (costs one opencode model turn)
 /opencode:transfer
 ```
 
-Every finished run prints the opencode session id; continue it directly in opencode with `opencode -s <session-id>`.
+Every run prints its job id *before* opencode starts, so a detached run can be polled while it is still going, and every finished run prints the opencode session id, the model that actually ran, and `opencode -s <session-id>` to continue it inside opencode.
+
+Exit codes: `0` a real answer, `1` the run failed, `2` the run finished without producing one.
 
 ### Stop-time review gate
 
 `/opencode:setup --enable-review-gate` makes opencode review every Claude turn that edited code before Claude is allowed to stop, blocking with concrete findings when something still needs fixing. It runs a full opencode turn on every stop — enable it only while actively monitoring a session, and disable it with `/opencode:setup --disable-review-gate`.
 
+Three deliberate limits keep it from trapping you in a session you cannot leave:
+
+- **It fails open.** Only an explicit `BLOCK:` verdict blocks. If the review itself cannot complete — no output, non-zero exit, unparseable answer, timeout — the stop is allowed and the reason is printed on stderr. Run `/opencode:review --wait` by hand when you see that.
+- **It stands down after two consecutive blocks** in one session and tells you to fix the findings or disable it.
+- **It skips the review entirely** when the working tree is clean and HEAD has not moved since the last stop, instead of paying for a model turn to be told there is nothing to review.
+
 ## How it works
 
 All commands go through one helper runtime, `plugins/opencode/scripts/opencode-companion.mjs`, which wraps headless `opencode run --format json`:
 
-- **Jobs**: every run is tracked in per-workspace state (under Claude's plugin-data dir), so status/result/cancel work across foreground, background, and even across Claude sessions. Session-end hooks terminate any still-running jobs.
-- **Read-only vs write**: read-only runs (reviews, plain rescue diagnosis) use opencode's built-in `plan` agent, which cannot edit files. Write-capable runs (`task --write`, the rescue default) pass `--auto` so opencode can act without interactive permission prompts.
-- **Structured reviews**: the review prompts embed a JSON schema contract; the companion parses the model's final answer into verdict/findings/next-steps, falling back to raw output when a model refuses to cooperate.
+- **Jobs**: every run is tracked in per-workspace state under this plugin's own data directory (`OPENCODE_COMPANION_DATA_DIR`, never the shared `CLAUDE_PLUGIN_DATA`), so status/result/cancel work across foreground, background and Claude sessions. Writes are serialised and atomic; a record whose process is gone is relabelled instead of counting up forever; session-end hooks terminate still-running jobs.
+- **Read-only vs write**: read-only runs (reviews, plain rescue diagnosis) use opencode's built-in `plan` agent, which cannot edit files. Write-capable runs (`task --write`, the rescue default) pass `--auto` so opencode can act without interactive permission prompts. Because the `plan` agent may carry its own model in your opencode config, every run reports the model it actually used.
+- **Three outcomes, not two**: exiting 0 is not a verdict. A run that produces no final text, stops for a reason that is not a finished turn, or answers a review with something that is not a review, is reported as `incomplete` with its partial output labelled as partial — never as a completed answer.
+- **Structured reviews**: the review prompts embed a JSON schema contract, and the companion validates the model's final answer against it before rendering a verdict, falling back to the raw output rather than synthesising one from a malformed object.
 - **Transfer**: opencode cannot import Claude transcripts natively, so `transfer` distills the Claude session transcript into a handoff prompt and seeds a fresh opencode session with it.
 
 ## Development
@@ -112,7 +124,7 @@ All commands go through one helper runtime, `plugins/opencode/scripts/opencode-c
 npm test
 ```
 
-Tests use `node:test` and a fake `opencode` fixture on PATH — no real model calls, no credentials needed.
+Tests use `node:test` and a fake `opencode` fixture on PATH — no real model calls, no credentials needed. Changes to the runtime contract are recorded in [plugins/opencode/CHANGELOG.md](plugins/opencode/CHANGELOG.md).
 
 ## License
 
