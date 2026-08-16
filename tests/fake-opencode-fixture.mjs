@@ -5,6 +5,7 @@
 //   OPENCODE_FAKE_MODE       success (default) | review-json | fail | silent
 //                            | empty-text | narration
 //   OPENCODE_FAKE_TEXT       final answer text for success mode
+//   OPENCODE_FAKE_STDERR     written to stderr before the run still exits 0
 //   OPENCODE_FAKE_ARGS_FILE  when set, argv is dumped there as JSON
 //   OPENCODE_FAKE_ORPHAN_RACE when set, relabels this run's own job record as
 //                            failed/orphaned just before exiting, standing in
@@ -65,6 +66,12 @@ if (args[0] === "models") {
 if (args[0] === "run") {
   if (process.env.OPENCODE_FAKE_ARGS_FILE) {
     fs.writeFileSync(process.env.OPENCODE_FAKE_ARGS_FILE, JSON.stringify(args, null, 2));
+  }
+
+  // opencode auto-rejects reads outside the repo on stderr and carries on to a
+  // normal exit 0 — the shape PC3 is about.
+  if (process.env.OPENCODE_FAKE_STDERR) {
+    process.stderr.write(`${process.env.OPENCODE_FAKE_STDERR}\n`);
   }
 
   if (mode === "fail") {

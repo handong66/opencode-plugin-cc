@@ -25,6 +25,18 @@ export function describeJobStatus(job) {
   return job?.status === "failed" && job?.failureClass ? `${job.status} (${job.failureClass})` : job?.status;
 }
 
+// opencode reports auto-rejected paths, provider warnings and quota notices on
+// stderr while still exiting 0, so the stderr tail belongs on the success path
+// too — hiding it there is what made `permission requested: external_directory
+// (/private/tmp/*); auto-rejecting` invisible to every caller.
+function stderrBlock(stderrTail, lineCount) {
+  const stderr = String(stderrTail ?? "").trim();
+  if (!stderr) {
+    return [];
+  }
+  return ["", "Most recent stderr:", "```", stderr.split(/\r?\n/).slice(-lineCount).join("\n"), "```"];
+}
+
 function footer(job) {
   const lines = ["", "---", `Job: ${job.id} (${job.kind}, ${job.status}, ${fmtDuration(job.durationMs)})`];
   if (job.opencodeSessionId) {
@@ -37,7 +49,7 @@ function footer(job) {
 export function renderTaskOutput(job, payload) {
   const text = String(payload.rawOutput ?? "").trim();
   const body = text || "[opencode returned no final output]";
-  return `${body}\n${footer(job)}`;
+  return [body, ...stderrBlock(payload.stderrTail, 5), footer(job)].join("\n");
 }
 
 const INCOMPLETE_REASON_DETAIL = {
@@ -61,11 +73,7 @@ export function renderIncompleteOutput(job, payload) {
   }
   lines.push("Partial output below — treat it as work-in-progress, not as the answer.");
   lines.push("", text || "[opencode produced no text]");
-
-  const stderr = String(payload.stderrTail ?? "").trim();
-  if (stderr) {
-    lines.push("", "Most recent stderr:", "```", stderr.split(/\r?\n/).slice(-5).join("\n"), "```");
-  }
+  lines.push(...stderrBlock(payload.stderrTail, 5));
 
   lines.push(
     "",
@@ -80,10 +88,7 @@ export function renderTaskFailure(job, payload) {
   if (payload.spawnError) {
     lines.push(`Spawn error: ${payload.spawnError}`);
   }
-  const stderr = String(payload.stderrTail ?? "").trim();
-  if (stderr) {
-    lines.push("", "Most recent stderr:", "```", stderr.split(/\r?\n/).slice(-15).join("\n"), "```");
-  }
+  lines.push(...stderrBlock(payload.stderrTail, 15));
   if (String(payload.rawOutput ?? "").trim()) {
     lines.push("", "Partial output:", String(payload.rawOutput).trim());
   }

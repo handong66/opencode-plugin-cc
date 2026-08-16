@@ -48,6 +48,26 @@ test("renderTaskOutput appends the job footer", () => {
   const rendered = renderTaskOutput(job, { rawOutput: "did the thing" });
   assert.match(rendered, /did the thing/);
   assert.match(rendered, /Job: review-x \(review, completed, 1m05s\)/);
+  assert.doesNotMatch(rendered, /Most recent stderr/, "no stderr, no empty block");
+});
+
+// PC3: opencode auto-rejects paths outside the repo on stderr and still exits
+// 0, so the success path used to hide the cause of a thin or missing answer.
+test("renderTaskOutput shows the stderr tail on a run that exited 0", () => {
+  const stderrTail = [
+    "line one",
+    "line two",
+    "line three",
+    "line four",
+    "line five",
+    "! permission requested: external_directory (/private/tmp/*); auto-rejecting"
+  ].join("\n");
+  const rendered = renderTaskOutput(job, { rawOutput: "a long real answer", stderrTail });
+  assert.match(rendered, /a long real answer/);
+  assert.match(rendered, /Most recent stderr:/);
+  assert.match(rendered, /permission requested: external_directory/);
+  assert.doesNotMatch(rendered, /line one/, "only the last 5 lines");
+  assert.match(rendered, /line two/);
 });
 
 test("renderIncompleteOutput labels the run, keeps partial text, and gives a recovery command", () => {

@@ -195,6 +195,29 @@ test("status stops reporting a job as running once its process is gone", () => {
   assert.equal(jobs.filter((job) => job.status === "completed").length, 1);
 });
 
+// PC3: Claude Code stages material in /private/tmp/claude-501/.../scratchpad,
+// opencode refuses to read outside the repo, says so on stderr, and exits 0.
+// A successful-looking answer must still carry that cause.
+test("a run that exited 0 still shows the auto-rejected path from stderr", () => {
+  const fake = makeFakeEnv({
+    extra: {
+      OPENCODE_FAKE_TEXT: "answer produced despite the rejected read",
+      OPENCODE_FAKE_STDERR: "! permission requested: external_directory (/private/tmp/*); auto-rejecting"
+    }
+  });
+  const cwd = makeTempGitRepo();
+
+  const result = runCompanion(["task", "--write", "read the scratchpad dossier"], { env: fake.env, cwd });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /answer produced despite the rejected read/);
+  assert.match(result.stdout, /Most recent stderr:/);
+  assert.match(result.stdout, /permission requested: external_directory/);
+
+  // And it survives into the stored render that /opencode:result replays.
+  const stored = runCompanion(["result"], { env: fake.env, cwd }).stdout;
+  assert.match(stored, /permission requested: external_directory/);
+});
+
 // P-LIVENESS, second half: reconciliation runs from every reader, so a job can
 // be relabelled `failed (orphaned)` in the window between its child exiting and
 // its companion writing the verdict. The verdict must win, and no trace of the
