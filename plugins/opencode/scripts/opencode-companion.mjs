@@ -995,7 +995,13 @@ async function commandReview(tokens, { adversarial }) {
       agent: payload.agent,
       variant: payload.variant,
       warnings: payload.warnings,
-      review: payload.structuredOutput,
+      // Only a finished run has a verdict. A blacklisted `stopReason` makes a
+      // run `incomplete` even when the JSON it had already emitted validates,
+      // and this field used to be populated anyway — so the human render said
+      // "not a verdict, do not infer one" while the machine channel handed one
+      // over. `rawOutput` below, and the stored payload behind `result --json`,
+      // still carry the text: this withholds the verdict, not the evidence.
+      review: outputState === "completed" ? payload.structuredOutput : null,
       rawOutput: payload.rawOutput
     });
   } else {
@@ -1313,12 +1319,22 @@ async function commandResult(tokens) {
   // breaks multi-byte characters and any JSON inside it (two recorded payload
   // corruptions came from exactly that).
   if (flags.has("--structured-only")) {
-    if (!payload.structuredOutput) {
+    // The same rule `review --json` applies: an unfinished run has no verdict,
+    // however well-formed the JSON it managed to emit. Printing it here with
+    // exit 0 while the human render called it work-in-progress made the three
+    // channels contradict each other about one job.
+    const unfinished = (payload.outputState ?? job.outputState) !== "completed";
+    if (!payload.structuredOutput || unfinished) {
       const detail = Array.isArray(payload.structuredOutputErrors) && payload.structuredOutputErrors.length > 0
         ? ` It did not match the review schema: ${payload.structuredOutputErrors.slice(0, 5).join("; ")}.`
         : "";
+      const reason = payload.structuredOutput
+        ? `did not finish (${payload.outputState ?? job.outputState}${
+            payload.outputStateReason ? `: ${payload.outputStateReason}` : ""
+          }), so its JSON object is not a verdict.`
+        : `has no structured output.${detail}`;
       print(
-        `Job ${job.id} (${job.kind}) has no structured output.${detail} Use /opencode:result ${job.id} for the rendered text, or --json for the whole payload.`
+        `Job ${job.id} (${job.kind}) ${reason} Use /opencode:result ${job.id} for the rendered text, or --json for the whole payload.`
       );
       process.exitCode = 1;
       return;
@@ -1591,7 +1607,8 @@ const SUBCOMMAND_HELP = {
     "  --timeout-ms <ms>       bound for --wait (default 900000)",
     "  --json                  the stored payload as JSON — use this to feed scripts,",
     "                          never head -c/tail -c on the rendered text",
-    "  --structured-only       print only the review JSON object (exit 1 if there is none)",
+    "  --structured-only       print only the review JSON object (exit 1 if there is none, or",
+    "                          if the run never finished — an incomplete run has no verdict)",
     "",
     "There is no output size limit and no truncation flag: the rendered text is",
     "meant to be relayed verbatim. Slicing it by bytes breaks multi-byte",

@@ -83,3 +83,43 @@ test("a well-formed review still renders as a verdict", () => {
   assert.equal(payload.review.verdict, "needs-attention");
   assert.equal(result.status, 0);
 });
+
+// A run that stops on a blacklisted `stopReason` is `incomplete` even when the
+// JSON it had already emitted validates. The three channels then disagreed
+// about the same job: the human render said "this is not a verdict, do not
+// infer one", while `--json` handed back a populated `review` and
+// `--structured-only` printed the object with exit 0. Whichever channel a
+// caller happened to read decided whether the review counted.
+test("an unfinished run does not publish its JSON as a verdict", () => {
+  const fake = makeFakeEnv({
+    mode: "review-json",
+    extra: { OPENCODE_FAKE_TOOLS: "3", OPENCODE_FAKE_STOP_REASON: "tool-calls" }
+  });
+  const cwd = makeTempGitRepo();
+
+  const human = runCompanion(["review"], { env: fake.env, cwd });
+  assert.equal(human.status, 2, human.stdout + human.stderr);
+  assert.match(human.stdout, /stopped before producing a final answer/);
+
+  const json = runCompanion(["review", "--json"], { env: fake.env, cwd });
+  const payload = JSON.parse(json.stdout);
+  assert.equal(payload.outputState, "incomplete");
+  assert.equal(payload.outputStateReason, "stop-reason");
+  assert.equal(payload.review, null, "an unfinished run has no verdict to publish");
+  assert.equal(payload.resultComplete, false);
+  // The text is still there — this withholds the verdict, it does not hide the
+  // evidence.
+  assert.match(payload.rawOutput, /"verdict"/);
+
+  const structured = runCompanion(["result", payload.jobId, "--structured-only"], { env: fake.env, cwd });
+  assert.equal(structured.status, 1, structured.stdout);
+  assert.match(structured.stdout, /did not finish|incomplete/i);
+  assert.match(structured.stdout, /--json/, "it must say where the object can still be read");
+
+  // And it can: the stored payload keeps the object for anyone who asks for the
+  // whole thing rather than for a verdict.
+  const whole = JSON.parse(
+    runCompanion(["result", payload.jobId, "--json"], { env: fake.env, cwd }).stdout
+  );
+  assert.equal(whole.payload.structuredOutput.verdict, "needs-attention");
+});

@@ -39,7 +39,7 @@ Evidence behind a review verdict:
 - The same judgement is machine-readable as `resultComplete` in `--json` and in the stored payload: it is `false` for a zero-evidence review and for any run that did not finish, `true` only when the run completed *and* the verdict has evidence behind it. Key off that field rather than re-deriving it; `outputState` still describes the run itself, so a zero-evidence review is `outputState: "completed"` with `resultComplete: false`.
 
 Feeding output to a script:
-- Use `/opencode:result <id> --json` (whole payload) or `--structured-only` (just the review JSON object; exits 1 with the reason when the run produced none). Both are exact.
+- Use `/opencode:result <id> --json` (whole payload) or `--structured-only` (just the review JSON object; exits 1 with the reason when the run produced none, and when the run is `incomplete` — an unfinished run has no verdict even if the JSON it emitted validates). Both are exact.
 - Never slice the rendered text with `head -c` / `tail -c`. It breaks multi-byte characters and any JSON inside the payload — two recorded corruptions came from doing that while `--json` was available.
 - There is no output cap and no truncation flag, deliberately. This helper's contract is that its output is relayed verbatim; adding a lossy limit would contradict it. If the output is too large for a caller, narrow the channel (`--json`, `--structured-only`, a specific field), not the content.
 - With `--json`, stdout is one JSON document and nothing else. Everything a run says on the way — the job handle, which session `--resume-last` picked, the notice that there was none — goes to stderr, so `JSON.parse(stdout)` is always safe.
