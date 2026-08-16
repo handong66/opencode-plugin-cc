@@ -3,19 +3,19 @@ import { test } from "node:test";
 
 import { makeTempDir } from "./helpers.mjs";
 
-process.env.CLAUDE_PLUGIN_DATA = makeTempDir("opencode-state-test");
-// The suite must own both env vars: on a machine with the plugin installed,
-// the SessionStart hook exports the namespaced dir into the shell, which
-// would otherwise take precedence and break the CLAUDE_PLUGIN_DATA tests.
-delete process.env.OPENCODE_COMPANION_DATA_DIR;
-const { upsertJob, findJob, listJobs, setConfig, getConfig, resolveStateDir } = await import(
-  "../plugins/opencode/scripts/lib/state.mjs"
-);
+// The suite owns both env vars so it never touches a real data directory, and
+// so an installed plugin's SessionStart export cannot leak in.
+process.env.OPENCODE_COMPANION_DATA_DIR = makeTempDir("opencode-state-test");
+process.env.CLAUDE_PLUGIN_DATA = makeTempDir("opencode-state-decoy");
+const { upsertJob, findJob, listJobs, setConfig, getConfig, resolveStateDir, resolveStateLocation } =
+  await import("../plugins/opencode/scripts/lib/state.mjs");
 
 const cwd = makeTempDir("opencode-state-workspace");
 
-test("state dir lands under CLAUDE_PLUGIN_DATA", () => {
-  assert.ok(resolveStateDir(cwd).startsWith(process.env.CLAUDE_PLUGIN_DATA));
+test("state dir lands under the namespaced data dir", () => {
+  const location = resolveStateLocation(cwd);
+  assert.ok(location.dir.startsWith(process.env.OPENCODE_COMPANION_DATA_DIR));
+  assert.equal(location.source, "plugin-data");
 });
 
 test("upsertJob inserts then patches without losing fields", () => {
@@ -45,13 +45,17 @@ test("config round-trips", () => {
   setConfig(cwd, "stopReviewGate", false);
 });
 
-test("namespaced data dir wins over a clobbered CLAUDE_PLUGIN_DATA", () => {
-  const namespaced = makeTempDir("opencode-namespaced");
-  process.env.OPENCODE_COMPANION_DATA_DIR = namespaced;
+// CLAUDE_PLUGIN_DATA is shared: it holds whichever plugin's SessionStart hook
+// ran last in this shell, so it is not consulted at all any more.
+test("a clobbered CLAUDE_PLUGIN_DATA is ignored, not used as a fallback", () => {
+  const namespaced = process.env.OPENCODE_COMPANION_DATA_DIR;
+  delete process.env.OPENCODE_COMPANION_DATA_DIR;
   try {
-    assert.ok(resolveStateDir(cwd).startsWith(namespaced));
+    const location = resolveStateLocation(cwd);
+    assert.equal(location.source, "tmpdir-fallback");
+    assert.ok(!location.dir.startsWith(process.env.CLAUDE_PLUGIN_DATA));
   } finally {
-    delete process.env.OPENCODE_COMPANION_DATA_DIR;
+    process.env.OPENCODE_COMPANION_DATA_DIR = namespaced;
   }
-  assert.ok(resolveStateDir(cwd).startsWith(process.env.CLAUDE_PLUGIN_DATA));
+  assert.ok(resolveStateDir(cwd).startsWith(namespaced));
 });

@@ -31,6 +31,7 @@ import {
 } from "./lib/render.mjs";
 import { SESSION_ID_ENV, TRANSCRIPT_PATH_ENV } from "./lib/session-env.mjs";
 import {
+  describeStateLocation,
   findJob,
   generateJobId,
   getConfig,
@@ -38,6 +39,7 @@ import {
   readJobFile,
   resolveJobLogFile,
   resolveStateDir,
+  resolveStateLocation,
   setConfig,
   upsertJob,
   writeJobFile
@@ -70,6 +72,45 @@ function print(text) {
 
 function printJson(payload) {
   process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+}
+
+// Where the job store resolved, and why — on stderr, never stdout, because
+// `commands/result.md` and `commands/status.md` require Claude to relay stdout
+// verbatim. Printed once per process, before anything touches the store.
+let stateLocationWarned = false;
+function warnAboutStateLocation(cwd) {
+  if (stateLocationWarned) {
+    return;
+  }
+  stateLocationWarned = true;
+  const warning = describeStateLocation(cwd);
+  if (warning) {
+    process.stderr.write(`warning: ${warning}\n`);
+  }
+}
+
+// A bare "No job found with id X" cannot distinguish a typo from the wrong
+// workspace, a store that resolved elsewhere, or a pruned job — one such
+// message cost two hours in 2026-07. Only id/kind/status of recent jobs are
+// listed: prompt previews must not leak into an error path.
+function describeMissingJob(cwd, jobId) {
+  const location = resolveStateLocation(cwd);
+  const lines = [`No job found with id ${jobId}.`, `Workspace root: ${location.workspaceRoot}`, `Job store: ${location.dir} (${location.source})`];
+  let recent = [];
+  try {
+    recent = listJobs(cwd).slice(0, 5);
+  } catch {
+    recent = [];
+  }
+  if (recent.length === 0) {
+    lines.push("This store holds no jobs at all — check that you are in the right repository, or run /opencode:setup to see where state resolves.");
+  } else {
+    lines.push("Most recent jobs in this store:");
+    for (const job of recent) {
+      lines.push(`  ${job.id} | ${job.kind} | ${describeJobStatus(job)}`);
+    }
+  }
+  return lines.join("\n");
 }
 
 function claudeSessionId() {
@@ -238,6 +279,7 @@ async function executeJob({
   timeoutMs = RUN_TIMEOUT_DEFAULT_MS,
   asJson = false
 }) {
+  warnAboutStateLocation(cwd);
   const jobId = generateJobId(JOB_ID_PREFIXES[kind] ?? "job");
   const logFile = resolveJobLogFile(cwd, jobId);
 
@@ -674,6 +716,7 @@ function commandSetup(tokens) {
     stopReviewGate: gateEnabled,
     nodeVersion: process.version,
     stateDir: resolveStateDir(cwd),
+    stateSource: resolveStateLocation(cwd).source,
     guidance: availability.available
       ? availability.authenticated
         ? null
@@ -735,12 +778,13 @@ async function commandStatus(tokens) {
     booleanFlags: ["--json", "--all", "--wait"]
   });
   const cwd = process.cwd();
+  warnAboutStateLocation(cwd);
   const jobId = rest[0] ?? null;
 
   if (jobId) {
     let job = findJob(cwd, jobId);
     if (!job) {
-      print(`No job found with id ${jobId}.`);
+      print(describeMissingJob(cwd, jobId));
       process.exitCode = 1;
       return;
     }
@@ -769,7 +813,8 @@ async function commandStatus(tokens) {
     (job) => flags.has("--all") || !sessionId || !job.sessionId || job.sessionId === sessionId
   );
   if (flags.has("--json")) {
-    printJson({ jobs });
+    const location = resolveStateLocation(cwd);
+    printJson({ jobs, stateDir: location.dir, stateSource: location.source, workspaceRoot: location.workspaceRoot });
   } else {
     print(renderJobList(jobs, { gateEnabled: Boolean(getConfig(cwd).stopReviewGate) }));
   }
@@ -781,6 +826,7 @@ async function commandResult(tokens) {
     booleanFlags: ["--json", "--wait"]
   });
   const cwd = process.cwd();
+  warnAboutStateLocation(cwd);
   const wantsWait = flags.has("--wait");
   const timeout = resolveTimeoutMs(flags, STATUS_WAIT_DEFAULT_TIMEOUT_MS);
   if (timeout.error) {
@@ -809,7 +855,7 @@ async function commandResult(tokens) {
   if (!job) {
     print(
       rest[0]
-        ? `No job found with id ${rest[0]}.`
+        ? describeMissingJob(cwd, rest[0])
         : "No finished opencode job found for this repository. Check /opencode:status for running jobs."
     );
     process.exitCode = 1;
@@ -837,12 +883,13 @@ async function commandResult(tokens) {
 function commandCancel(tokens) {
   const { rest } = parseFlags(tokens, { booleanFlags: [] });
   const cwd = process.cwd();
+  warnAboutStateLocation(cwd);
   const job = pickJob(cwd, rest[0] ?? null, (candidate) =>
     ["running", "queued"].includes(candidate.status)
   );
 
   if (!job) {
-    print(rest[0] ? `No job found with id ${rest[0]}.` : "No running opencode job to cancel.");
+    print(rest[0] ? describeMissingJob(cwd, rest[0]) : "No running opencode job to cancel.");
     process.exitCode = rest[0] ? 1 : 0;
     return;
   }
@@ -1161,6 +1208,14 @@ async function main() {
 }
 
 main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+  // A store owned by another plugin is a configuration problem, not a crash:
+  // the message says exactly what to fix, and a stack trace only buries it.
+  const message =
+    error?.code === "STATE_OWNER_MISMATCH"
+      ? error.message
+      : error instanceof Error
+        ? (error.stack ?? error.message)
+        : String(error);
+  process.stderr.write(`${message}\n`);
   process.exitCode = 1;
 });

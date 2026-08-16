@@ -4,10 +4,14 @@ import os from "node:os";
 import path from "node:path";
 
 import { isAlive } from "./process.mjs";
-import { DATA_DIR_ENV, PLUGIN_DATA_ENV } from "./session-env.mjs";
+import { DATA_DIR_ENV } from "./session-env.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 const STATE_VERSION = 1;
+// Written into state.json and checked on every read. Two plugins sharing a
+// directory is not hypothetical: the Codex sibling exports `CLAUDE_PLUGIN_DATA`
+// too, and opencode job logs were found under `codex-inline/state/...`.
+export const STATE_OWNER = "opencode-plugin-cc";
 // How long a running record may go without a pid before it counts as dead.
 // Wide enough to cover the gap between `upsertJob(running)` and `onSpawn`.
 export const ORPHAN_GRACE_MS = 120_000;
@@ -25,6 +29,7 @@ function nowIso() {
 function defaultState() {
   return {
     version: STATE_VERSION,
+    owner: STATE_OWNER,
     config: {
       stopReviewGate: false
     },
@@ -32,7 +37,11 @@ function defaultState() {
   };
 }
 
-export function resolveStateDir(cwd) {
+// Returns where state lives *and how that was decided*, so every caller can say
+// so. `CLAUDE_PLUGIN_DATA` is deliberately not consulted: it is a shared name
+// that holds whichever plugin's SessionStart hook ran last, which is how
+// opencode jobs ended up in the Codex plugin's data directory for two hours.
+export function resolveStateLocation(cwd) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   let canonicalWorkspaceRoot = workspaceRoot;
   try {
@@ -44,11 +53,21 @@ export function resolveStateDir(cwd) {
   const slugSource = path.basename(workspaceRoot) || "workspace";
   const slug = slugSource.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
   const hash = createHash("sha256").update(canonicalWorkspaceRoot).digest("hex").slice(0, 16);
-  // Prefer the namespaced dir exported by our SessionStart hook; the shared
-  // CLAUDE_PLUGIN_DATA name may hold another plugin's dir in Bash contexts.
-  const pluginDataDir = process.env[DATA_DIR_ENV] || process.env[PLUGIN_DATA_ENV];
+  const pluginDataDir = process.env[DATA_DIR_ENV];
+  const source = pluginDataDir ? "plugin-data" : "tmpdir-fallback";
   const stateRoot = pluginDataDir ? path.join(pluginDataDir, "state") : FALLBACK_STATE_ROOT_DIR;
-  return path.join(stateRoot, `${slug}-${hash}`);
+  return { dir: path.join(stateRoot, `${slug}-${hash}`), source, workspaceRoot };
+}
+
+export function resolveStateDir(cwd) {
+  return resolveStateLocation(cwd).dir;
+}
+
+export function describeStateLocation(cwd) {
+  const location = resolveStateLocation(cwd);
+  return location.source === "tmpdir-fallback"
+    ? `${DATA_DIR_ENV} is unset; using the temporary job store at ${location.dir}. Jobs may not be visible to other Claude sessions or to Bash contexts that did not source the session env file. Reload the plugin or restart the session.`
+    : null;
 }
 
 export function resolveStateFile(cwd) {
@@ -69,20 +88,35 @@ export function loadState(cwd) {
     return defaultState();
   }
 
+  let parsed;
   try {
-    const parsed = JSON.parse(fs.readFileSync(stateFile, "utf8"));
-    return {
-      ...defaultState(),
-      ...parsed,
-      config: {
-        ...defaultState().config,
-        ...(parsed.config ?? {})
-      },
-      jobs: Array.isArray(parsed.jobs) ? parsed.jobs : []
-    };
+    parsed = JSON.parse(fs.readFileSync(stateFile, "utf8"));
   } catch {
     return defaultState();
   }
+
+  // A state file stamped with someone else's name means the data dir resolved
+  // to another plugin's store. Refusing is the only safe move: writing here
+  // would corrupt their records, and reading would report their jobs as ours.
+  // A file with no owner predates the stamp and is adopted on the next write.
+  if (parsed.owner && parsed.owner !== STATE_OWNER) {
+    const error = new Error(
+      `${stateFile} belongs to ${parsed.owner}, not ${STATE_OWNER}. Point ${DATA_DIR_ENV} at this plugin's own data directory (or unset it and reload the plugin).`
+    );
+    error.code = "STATE_OWNER_MISMATCH";
+    throw error;
+  }
+
+  return {
+    ...defaultState(),
+    ...parsed,
+    owner: STATE_OWNER,
+    config: {
+      ...defaultState().config,
+      ...(parsed.config ?? {})
+    },
+    jobs: Array.isArray(parsed.jobs) ? parsed.jobs : []
+  };
 }
 
 function pruneJobs(jobs) {
@@ -134,6 +168,7 @@ export function saveState(cwd, state, { attempt = 0 } = {}) {
   const nextJobs = pruneJobs([...merged.values()]);
   const nextState = {
     version: STATE_VERSION,
+    owner: STATE_OWNER,
     config: {
       ...defaultState().config,
       ...(state.config ?? {})
