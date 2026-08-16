@@ -7,3 +7,4 @@ output/
 *.tgz
 *.zip
 .claude/settings.local.json
+.local/
