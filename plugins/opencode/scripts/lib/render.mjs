@@ -282,6 +282,12 @@ export function renderJobDetail(job, payload, logTail) {
   if (job.promptPreview) {
     lines.push(`Prompt: ${job.promptPreview}`);
   }
+  // The four output renderers all printed these; the one command whose whole
+  // job is "tell me about this finished run" did not, so `external_path_blocked`
+  // and `skills_loaded` were visible everywhere except where a caller goes to
+  // ask what happened. Above the raw log for the usual reason: the log says
+  // what opencode printed, the warning says what it means.
+  lines.push(...warningBlock(payload?.warnings));
   if (logTail) {
     lines.push("", "Recent activity:", "```", logTail, "```");
   }

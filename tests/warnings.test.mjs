@@ -42,6 +42,45 @@ test("an auto-rejected external path becomes a typed, actionable warning", () =>
   assert.equal(payload.warnings[0].path, "/private/tmp/claude-501/x/scratchpad/dossier.json");
 });
 
+// Every renderer printed the typed warnings except the one a caller reaches
+// when the run is *over* and they are asking what happened to it: `status <id>`
+// showed the raw log tail and no Warnings section, so the one channel dedicated
+// to inspecting a finished job was the one that did not explain it.
+test("status <id> shows the typed warnings, not only the raw log", () => {
+  const fake = makeFakeEnv({
+    extra: {
+      OPENCODE_FAKE_TEXT: "answer produced without the dossier",
+      OPENCODE_FAKE_STDERR: REJECTION_LINE
+    }
+  });
+  const cwd = makeTempGitRepo();
+
+  const run = runCompanion(["task", "--json", "--write", "read the scratchpad dossier"], { env: fake.env, cwd });
+  const { jobId } = JSON.parse(run.stdout);
+
+  const detail = runCompanion(["status", jobId], { env: fake.env, cwd });
+  assert.equal(detail.status, 0, detail.stderr);
+  assert.match(detail.stdout, /Warnings:/);
+  assert.match(detail.stdout, /external_path_blocked: opencode refused to read \/private\/tmp\/claude-501/);
+  // Above the raw activity log, for the same reason it sits above the stderr
+  // block elsewhere: the tail says what opencode printed, the warning says what
+  // it means for the answer.
+  assert.ok(
+    detail.stdout.indexOf("Warnings:") < detail.stdout.indexOf("Recent activity:"),
+    "the warnings belong above the raw log tail"
+  );
+
+  // A run with nothing to report must not grow an empty section.
+  const quiet = makeFakeEnv();
+  const quietCwd = makeTempGitRepo();
+  const quietRun = runCompanion(["task", "--json", "--", "just answer"], { env: quiet.env, cwd: quietCwd });
+  const quietDetail = runCompanion(["status", JSON.parse(quietRun.stdout).jobId], {
+    env: quiet.env,
+    cwd: quietCwd
+  });
+  assert.doesNotMatch(quietDetail.stdout, /Warnings:/);
+});
+
 // X1 (2): the prompt preamble tells headless delegates not to load interactive
 // skills, but a repository AGENTS.md/CLAUDE.md can still win. 89 of 231 recorded
 // opencode job logs opened by loading a skill instead of doing the work, which
