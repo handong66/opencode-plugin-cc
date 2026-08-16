@@ -30,7 +30,7 @@ import {
   renderTaskFailure,
   renderTaskOutput
 } from "./lib/render.mjs";
-import { SESSION_ID_ENV, TRANSCRIPT_PATH_ENV } from "./lib/session-env.mjs";
+import { READY_ENV, SESSION_ID_ENV, TRANSCRIPT_PATH_ENV } from "./lib/session-env.mjs";
 import {
   describeStateLocation,
   findJob,
@@ -120,6 +120,12 @@ function claudeSessionId() {
 }
 
 function requireOpencodeReady({ asJson }) {
+  // The Stop hook probes availability before it spawns this process; running
+  // `opencode --version` + `opencode auth list` again costs ~1.1s per stop for
+  // an answer the parent already has.
+  if (process.env[READY_ENV] === "1") {
+    return { available: true, usable: true, authenticated: true, checkedByParent: true };
+  }
   const availability = getOpencodeAvailability();
   if (availability.available && availability.usable) {
     return availability;

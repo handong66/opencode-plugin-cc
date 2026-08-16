@@ -16,3 +16,7 @@ Output rules:
 - If opencode is installed but has no stored provider credentials, preserve the guidance to run `!opencode auth login`, and mention that free opencode zen models may work without credentials.
 - If the user toggled the review gate, confirm its new state explicitly.
 - When enabling the review gate, warn the user: the gate runs an opencode review on every stop and can create a long-running Claude/opencode loop that drains usage limits quickly. It should only stay enabled while they actively monitor the session.
+- When enabling the review gate, also state its limits plainly, because they are deliberate trade-offs and not bugs:
+  - It **fails open**. If the review itself cannot complete (no output, non-zero exit, unparseable answer, timeout), the stop is allowed and the reason is printed on stderr. Only an explicit `BLOCK:` verdict blocks. A gate whose failure mode is "the user cannot end the session" is worse than one that occasionally misses a review — run `/opencode:review --wait` by hand when you see that message.
+  - It **stands down after two consecutive blocks** in one session and says so, instead of holding the session hostage. Fix the findings or disable the gate with `/opencode:setup --disable-review-gate`.
+  - It **skips the review entirely** when the working tree is clean and HEAD has not moved since the previous stop.
