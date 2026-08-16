@@ -9,7 +9,12 @@ import { fileURLToPath } from "node:url";
 import { tokenize, parseFlags } from "./lib/args.mjs";
 import { extractClaudeMessages, buildHandoffTranscript } from "./lib/claude-transcript.mjs";
 import { collectReviewInput } from "./lib/git.mjs";
-import { classifyOutcome, getOpencodeAvailability, runOpencode } from "./lib/opencodecli.mjs";
+import {
+  classifyOutcome,
+  getOpencodeAvailability,
+  parseEventStream,
+  runOpencode
+} from "./lib/opencodecli.mjs";
 import { terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
@@ -103,6 +108,85 @@ function rejectsBackgroundFlag(flags) {
   return true;
 }
 
+// The one run this process owns, if any. `opencode` is spawned detached so
+// `cancel` can signal its process group, which also means it outlives us unless
+// we take it down on the way out.
+let inFlightRun = null;
+let interruptHandled = false;
+const TERMINATION_SIGNALS = ["SIGTERM", "SIGINT", "SIGHUP"];
+
+// Small, synchronous and idempotent by contract: some harnesses follow SIGTERM
+// with SIGKILL about two seconds later, and `cancel` / the SessionEnd hook may
+// already have written a terminal state for this job.
+function handleTerminationSignal(signal) {
+  const run = inFlightRun;
+  inFlightRun = null;
+  if (!interruptHandled) {
+    interruptHandled = true;
+    try {
+      if (run) {
+        if (run.childPid) {
+          terminateProcessTree(run.childPid);
+        }
+        const current = findJob(run.cwd, run.jobId, { reconcile: false });
+        if (!current || current.status === "running" || current.status === "queued") {
+          const parsed = parseEventStream(run.getStdout?.() ?? "");
+          const durationMs = Number.isFinite(run.startedAtMs) ? Date.now() - run.startedAtMs : null;
+          const interruptedJob = {
+            id: run.jobId,
+            kind: run.kind,
+            status: "failed",
+            failureClass: "interrupted",
+            durationMs,
+            opencodeSessionId: parsed?.sessionId ?? null
+          };
+          const payload = {
+            kind: run.kind,
+            rawOutput: parsed?.text ?? "",
+            structuredOutput: null,
+            stopReason: parsed?.stopReason ?? null,
+            outputState: "failed",
+            outputStateReason: "interrupted",
+            toolEventCount: parsed?.toolEventCount ?? 0,
+            opencodeSessionId: parsed?.sessionId ?? null,
+            exitCode: null,
+            spawnError: null,
+            stderrTail: run.getStderrTail?.() ?? "",
+            interrupted: true,
+            durationMs
+          };
+          // Rendered here, not on read: whatever opencode had streamed is the
+          // only output this job will ever have, and `result <id>` must show it.
+          payload.rendered = renderTaskFailure(interruptedJob, payload);
+          writeJobFile(run.cwd, run.jobId, payload);
+          upsertJob(run.cwd, {
+            id: run.jobId,
+            status: "failed",
+            failureClass: "interrupted",
+            childPid: null,
+            durationMs,
+            endedAt: new Date().toISOString(),
+            summary:
+              "companion was terminated (Bash timeout or session teardown); opencode child killed"
+          });
+        }
+      }
+    } catch {
+      // Best effort: a bookkeeping failure must not stop the process from dying.
+    }
+  }
+  // Re-raise with the default disposition so the exit status stays truthful
+  // (143 for SIGTERM), which is what the caller's timeout detection reads.
+  process.removeAllListeners(signal);
+  process.kill(process.pid, signal);
+}
+
+function installSignalHandlers() {
+  for (const signal of TERMINATION_SIGNALS) {
+    process.on(signal, handleTerminationSignal);
+  }
+}
+
 function resolveTimeoutMs(flags, defaultMs) {
   const raw = flags.get("--timeout-ms");
   if (raw === undefined) {
@@ -140,16 +224,35 @@ async function executeJob({
     startedAt: new Date().toISOString()
   });
 
+  installSignalHandlers();
+  inFlightRun = {
+    jobId,
+    kind,
+    cwd,
+    childPid: null,
+    startedAtMs: Date.now(),
+    getStdout: null,
+    getStderrTail: null
+  };
+
   const outcome = await runOpencode(opencodeOptions, {
     cwd,
     logFile,
     timeoutMs,
-    onSpawn: (child) => upsertJob(cwd, { id: jobId, childPid: child.pid }),
+    onSpawn: (child, buffers) => {
+      inFlightRun = { ...inFlightRun, childPid: child.pid, ...buffers };
+      upsertJob(cwd, { id: jobId, childPid: child.pid });
+    },
     // Parsing a multi-hundred-KB event stream and rendering it takes real time,
     // and for all of it the child pid is already dead while this record still
     // says `running`. Dropping the pid here moves the record onto the grace
     // window instead, so a concurrent reader cannot reconcile a live run.
-    onExit: () => upsertJob(cwd, { id: jobId, childPid: null })
+    onExit: () => {
+      if (inFlightRun?.jobId === jobId) {
+        inFlightRun = { ...inFlightRun, childPid: null };
+      }
+      upsertJob(cwd, { id: jobId, childPid: null });
+    }
   });
 
   const parsed = outcome.parsed ?? {};
@@ -227,6 +330,10 @@ async function executeJob({
 
   writeJobFile(cwd, jobId, payload);
   upsertJob(cwd, job);
+  // The verdict is on disk; a signal from here on is an ordinary interruption
+  // of this process and must not rewrite it. Kept in flight until now so a kill
+  // during the parse-and-render window still stores the buffered output.
+  inFlightRun = null;
 
   return { ok, incomplete, outputState: classification.state, jobId, job: fullJob, payload };
 }

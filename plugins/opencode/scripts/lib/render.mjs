@@ -95,6 +95,13 @@ export function renderTaskFailure(job, payload) {
       "Re-run with a larger --timeout-ms, or narrow the task."
     );
   }
+  if (payload.interrupted) {
+    lines.push(
+      "The companion was terminated (Bash timeout or session teardown) before opencode finished, and its child was killed with it.",
+      "Anything opencode had streamed by then is below — treat it as work-in-progress, not as the answer.",
+      "Recover with: /opencode:rescue --resume Return only the final answer itself. Do not read any more files and do not call any tools."
+    );
+  }
   if (payload.spawnError) {
     lines.push(`Spawn error: ${payload.spawnError}`);
   }

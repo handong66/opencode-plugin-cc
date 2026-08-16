@@ -85,9 +85,22 @@ if (args[0] === "run") {
   // can only be bounded by the companion. Emit one event first so the stream is
   // parseable, then block until something kills the process group.
   if (mode === "hang") {
+    const sessionID = "ses_fake0123456789";
+    const messageID = "msg_fake0123456789";
     process.stdout.write(
-      `${JSON.stringify({ type: "step_start", part: { id: "prt_step1", sessionID: "ses_fake0123456789" } })}\n`
+      `${JSON.stringify({ type: "step_start", sessionID, part: { id: "prt_step1", messageID, sessionID } })}\n`
     );
+    // With OPENCODE_FAKE_TEXT the run has already produced partial output when
+    // it stalls — the shape P-ORPHAN's payload rescue is about.
+    if (process.env.OPENCODE_FAKE_TEXT) {
+      process.stdout.write(
+        `${JSON.stringify({
+          type: "text",
+          sessionID,
+          part: { id: "prt_text1", messageID, sessionID, type: "text", text: process.env.OPENCODE_FAKE_TEXT }
+        })}\n`
+      );
+    }
     await new Promise((resolve) => setTimeout(resolve, 120_000));
     process.exit(0);
   }

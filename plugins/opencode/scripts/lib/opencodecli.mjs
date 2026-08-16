@@ -346,8 +346,15 @@ export function runOpencode(
       stdio: ["ignore", "pipe", "pipe"]
     });
 
+    let stdout = "";
+    let lineBuffer = "";
+    let stderrTail = "";
+
     if (onSpawn) {
-      onSpawn(child);
+      // The buffered stream is handed over as accessors, not a copy: a
+      // companion killed mid-run has to be able to store whatever opencode had
+      // produced by then, from inside a synchronous signal handler.
+      onSpawn(child, { getStdout: () => stdout, getStderrTail: () => stripAnsi(stderrTail) });
     }
 
     let timedOut = false;
@@ -366,9 +373,6 @@ export function runOpencode(
       }
     };
 
-    let stdout = "";
-    let lineBuffer = "";
-    let stderrTail = "";
     child.stdout.on("data", (chunk) => {
       const text = String(chunk);
       stdout += text;
