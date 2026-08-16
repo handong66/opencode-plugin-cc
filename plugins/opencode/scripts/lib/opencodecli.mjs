@@ -193,7 +193,7 @@ export function classifyFailure({ exitCode = null, spawnError = null, stderrTail
 // opencode announces an auto-rejected permission on stderr and still exits 0,
 // e.g. `! permission requested: external_directory (/private/tmp/*);
 // auto-rejecting`. Claude Code stages large prompts and material under
-// /private/tmp/claude-501/<project>/<session>/scratchpad by default, so this is
+// /private/tmp/claude-<uid>/<project>/<session>/scratchpad by default, so this is
 // a structural collision between the two conventions, not an edge case.
 const PERMISSION_REJECT_PATTERN = /permission requested:\s*([\w-]+)\s*\(([^)]*)\);\s*auto-rejecting/gi;
 
