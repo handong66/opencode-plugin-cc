@@ -35,6 +35,27 @@ test("--json keeps stdout a single document and puts the handle on stderr", () =
   assert.match(handle.logFile, /\.log$/);
 });
 
+// The same contract on the path that does no work: `--resume-last` in a
+// repository that has never run a job. The success branch was routed to stderr
+// when the handle went there; this one kept printing a sentence to stdout ahead
+// of the payload, so JSON.parse failed on the most ordinary state there is.
+test("--json stays a single parseable document when there is nothing to resume", () => {
+  const fake = makeFakeEnv({ extra: { OPENCODE_FAKE_TEXT: "the answer" } });
+  const cwd = makeTempGitRepo();
+
+  const result = runCompanion(["task", "--json", "--resume-last", "--", "hello world"], {
+    env: fake.env,
+    cwd
+  });
+  assert.equal(result.status, 0, result.stderr);
+
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.resumedFrom, null, "there was no session to resume");
+  assert.equal(payload.outputState, "completed", "and the run itself still happened");
+  assert.doesNotMatch(result.stdout, /No previous opencode session/, "the notice must not precede the JSON");
+  assert.match(result.stderr, /No previous opencode session found for this repository/, "but it is still reported");
+});
+
 test("review announces its handle too", () => {
   const fake = makeFakeEnv({ mode: "review-json" });
   const result = runCompanion(["review"], { env: fake.env, cwd: makeTempGitRepo() });

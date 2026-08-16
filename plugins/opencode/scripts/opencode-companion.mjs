@@ -682,16 +682,20 @@ async function commandTask(tokens) {
     if (candidate) {
       resumeSessionId = candidate.opencodeSessionId;
       resumedFrom = { jobId: candidate.id, opencodeSessionId: candidate.opencodeSessionId };
-      // Which session was picked was previously invisible, so a heuristic that
-      // chose a different job from the one the user approved never showed up.
-      const line = `Resuming opencode session ${candidate.opencodeSessionId} (from job ${candidate.id}: ${candidate.promptPreview ?? candidate.summary ?? "no prompt recorded"})`;
-      if (asJson) {
-        process.stderr.write(`${line}\n`);
-      } else {
-        print(line);
-      }
+    }
+    // Which session was picked was previously invisible, so a heuristic that
+    // chose a different job from the one the user approved never showed up.
+    // Both outcomes are narration, and under `--json` stdout is a single JSON
+    // document (PC1), so both go to stderr there. Only the success branch used
+    // to: a repository with nothing to resume — the ordinary state of a fresh
+    // one — printed a sentence in front of the payload and broke JSON.parse.
+    const line = candidate
+      ? `Resuming opencode session ${candidate.opencodeSessionId} (from job ${candidate.id}: ${candidate.promptPreview ?? candidate.summary ?? "no prompt recorded"})`
+      : "No previous opencode session found for this repository; starting a fresh run.";
+    if (asJson) {
+      process.stderr.write(`${line}\n`);
     } else {
-      print("No previous opencode session found for this repository; starting a fresh run.");
+      print(line);
     }
   }
 
