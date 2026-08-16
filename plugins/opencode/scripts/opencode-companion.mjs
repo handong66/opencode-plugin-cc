@@ -1108,11 +1108,38 @@ function withElapsed(job) {
   return { ...job, elapsedMs, resultComplete: job.resultComplete ?? null };
 }
 
+// `parseFlags` records `--timeout-ms requires a value` and then carries on, so
+// the flag simply reads as unset — and `status --wait --timeout-ms` fell back to
+// the 15-minute default and blocked for it without ever printing the error it
+// had already produced. Only `task` and `review` read `errors`; these two are
+// the rest of that family.
+function rejectsFlagProblems({ errors, unknownFlags }, { command, supported }) {
+  if (errors.length > 0) {
+    print(`Invalid arguments: ${errors.join("; ")}`);
+    process.exitCode = 1;
+    return true;
+  }
+  if (unknownFlags.length > 0) {
+    print(`Unknown flag: ${unknownFlags[0]}. Supported: ${supported}. Run '${command} --help' for the full list.`);
+    process.exitCode = 1;
+    return true;
+  }
+  return false;
+}
+
 async function commandStatus(tokens) {
-  const { flags, rest } = parseFlags(tokens, {
+  const { flags, rest, errors, unknownFlags } = parseFlags(tokens, {
     valueFlags: ["--timeout-ms"],
     booleanFlags: ["--json", "--all", "--wait"]
   });
+  if (
+    rejectsFlagProblems(
+      { errors, unknownFlags },
+      { command: "status", supported: "--json, --all, --wait, --timeout-ms <ms>" }
+    )
+  ) {
+    return;
+  }
   const cwd = process.cwd();
   warnAboutStateLocation(cwd);
   const jobId = rest[0] ?? null;
@@ -1171,10 +1198,18 @@ async function commandStatus(tokens) {
 }
 
 async function commandResult(tokens) {
-  const { flags, rest } = parseFlags(tokens, {
+  const { flags, rest, errors, unknownFlags } = parseFlags(tokens, {
     valueFlags: ["--timeout-ms"],
     booleanFlags: ["--json", "--wait", "--structured-only"]
   });
+  if (
+    rejectsFlagProblems(
+      { errors, unknownFlags },
+      { command: "result", supported: "--json, --structured-only, --wait, --timeout-ms <ms>" }
+    )
+  ) {
+    return;
+  }
   const cwd = process.cwd();
   warnAboutStateLocation(cwd);
   const wantsWait = flags.has("--wait");

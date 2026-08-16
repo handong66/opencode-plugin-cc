@@ -219,3 +219,53 @@ test("result --wait gives up at its deadline instead of hanging", () => {
   assert.equal(result.status, 1);
   assert.match(result.stdout, /still running/);
 });
+
+// X2: `parseFlags` pushes "--timeout-ms requires a value" into `errors` and then
+// carries on, so the flag reads as unset. Only `task` and `review` checked
+// `errors`, which left `status`/`result` falling back to the 15-minute default
+// and blocking for it — the error they had already produced never printed.
+test("status and result reject flags that lost their value instead of blocking", () => {
+  const fake = makeFakeEnv();
+  const cwd = makeTempGitRepo();
+  const seed = `
+    const { upsertJob } = await import(${JSON.stringify(STATE_MODULE)});
+    upsertJob(${JSON.stringify(cwd)}, {
+      id: "task-valueless-flag",
+      kind: "task",
+      status: "running",
+      cwd: ${JSON.stringify(cwd)},
+      childPid: ${process.pid},
+      promptPreview: "still going",
+      startedAt: new Date().toISOString()
+    });
+  `;
+  const seeded = spawnSync(process.execPath, ["--input-type=module", "-e", seed], {
+    env: fake.env,
+    encoding: "utf8"
+  });
+  assert.equal(seeded.status, 0, seeded.stderr);
+
+  for (const argv of [
+    ["status", "task-valueless-flag", "--wait", "--timeout-ms"],
+    ["result", "task-valueless-flag", "--wait", "--timeout-ms"]
+  ]) {
+    const startedAt = Date.now();
+    const run = runCompanion(argv, { env: fake.env, cwd });
+    const output = run.stdout + run.stderr;
+    assert.equal(run.status, 1, output);
+    assert.match(output, /Invalid arguments: --timeout-ms requires a value/, argv.join(" "));
+    assert.ok(
+      Date.now() - startedAt < 15_000,
+      `${argv.join(" ")} must be rejected rather than waiting out the default budget`
+    );
+  }
+
+  // The other half of the same parse: a mistyped flag used to be read as a job
+  // id (`status --jsn` → "No job found with id --jsn").
+  const mistyped = runCompanion(["status", "--jsn"], { env: fake.env, cwd });
+  assert.equal(mistyped.status, 1);
+  assert.match(mistyped.stdout + mistyped.stderr, /Unknown flag: --jsn/);
+  const mistypedResult = runCompanion(["result", "--strucutred-only"], { env: fake.env, cwd });
+  assert.equal(mistypedResult.status, 1);
+  assert.match(mistypedResult.stdout + mistypedResult.stderr, /Unknown flag: --strucutred-only/);
+});
