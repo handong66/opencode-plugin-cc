@@ -10,9 +10,17 @@ permissions:
 
 jobs:
   ci:
-    name: CI
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    name: CI (${{ matrix.os }})
+    # Development happens on macOS and the plugin is installed on both, while
+    # the runtime touches process groups, signals and atomic renames — the
+    # places where the two platforms differ. Testing one of them is testing half.
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
 
     steps:
       - name: Check out repository
@@ -25,3 +33,14 @@ jobs:
 
       - name: Run test suite
         run: npm test
+
+      - name: Syntax-check every runtime file
+        run: |
+          for file in plugins/opencode/scripts/*.mjs plugins/opencode/scripts/lib/*.mjs; do
+            node --check "$file"
+          done
+
+      - name: Smoke-test the companion entry point
+        # No opencode CLI here, so this asserts the readiness report is
+        # well-formed JSON — not that opencode is installed.
+        run: node plugins/opencode/scripts/opencode-companion.mjs setup --json | node -e 'process.stdin.setEncoding("utf8"); let raw = ""; process.stdin.on("data", (chunk) => { raw += chunk; }); process.stdin.on("end", () => { JSON.parse(raw); });'
