@@ -17,7 +17,7 @@ Core constraint:
 - Do not fix issues, apply patches, or suggest that you are about to make changes.
 - Your only job is to run the review and return opencode's output verbatim to the user.
 - Keep the framing focused on whether the current approach is the right one, what assumptions it depends on, and where the design could fail under real-world conditions.
-- `--threat-model "<boundary>"` states what the system is actually exposed to (for example `single-user local application, no network exposure`). Preserve it for the forwarded companion call. Without it the reviewer assumes a single-user local application. Findings outside the stated boundary come back labelled `out-of-model`: they are advisory, they cannot produce a blocking verdict, and you must never let one interrupt work the user already has in flight.
+- `--threat-model "<boundary>"` states what the system is actually exposed to (for example `single-user local application, no network exposure`). Preserve it for the forwarded companion call. Without it the reviewer assumes a single-user local application. Findings outside the stated boundary come back labelled `out-of-model` in the finding body: they are advisory, the reviewer is instructed not to let one produce `needs-attention`, and you must never let one interrupt work the user already has in flight. The label is the reviewer's own, in prose — nothing in the runtime checks it or overrides the verdict — so if the verdict and the labels disagree, read the findings and say so rather than trusting the verdict line.
 
 Execution mode rules:
 - If the raw arguments include `--wait`, do not ask. Run in the foreground.

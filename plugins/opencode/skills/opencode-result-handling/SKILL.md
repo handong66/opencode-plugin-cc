@@ -49,6 +49,7 @@ Feeding output to a script:
 Threat-model labels on adversarial reviews:
 - `/opencode:adversarial-review --threat-model "<boundary>"` states what the system is exposed to. Without it the reviewer assumes a single-user local application with no network exposure.
 - Findings the reviewer labels `out-of-model` are **advisory**. Never present them as blocking, never let one halt work that is already in progress (a test run, a verification pass, a deploy), and never turn one into a `needs-attention` verdict on your own.
+- That rule lives in the prompt, not in the runtime: the label is prose inside the finding body, the output schema has no field for it, and the helper never rewrites a verdict. So a `needs-attention` whose only findings are out-of-model is possible — when you see one, report the mismatch instead of relaying the verdict.
 - If an out-of-model finding looks genuinely important, mention it once, after the in-model findings, and let the user decide.
 
 Job handles:
