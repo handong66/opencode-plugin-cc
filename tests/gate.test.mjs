@@ -128,3 +128,51 @@ test("the inner review deadline is strictly below the Stop hook budget", () => {
   );
   assert.match(source, /STOP_REVIEW_TIMEOUT_MS\s*=\s*Math\.round\(STOP_HOOK_BUDGET_MS \* 0\.8\)/);
 });
+
+// X6 (1): three of these hooks fire on every Stop of every session, and the
+// gate was enabled in none of 25 recorded workspaces. A workspace that never
+// used the plugin should cost node startup and one existsSync, nothing else.
+test("a workspace that never used the plugin costs one file check", () => {
+  const fake = makeFakeEnv();
+  const cwd = makeTempGitRepo();
+
+  const result = runHook({ cwd, session_id: "s1" }, { env: fake.env, cwd });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), "");
+  assert.equal(
+    fs.existsSync(path.join(fake.stateDir, "state")),
+    false,
+    "the disabled path must not create a job store"
+  );
+});
+
+// X6 (2): the "job still running" reminder used to go to stderr, which reaches
+// neither the model nor the transcript — 348 recorded Stop records carry an
+// empty hook content field. It is the one signal that could have caught the
+// orphaned jobs, so it now travels as a non-blocking hook decision payload.
+test("an unreclaimed job is reported to the session, not to stderr", () => {
+  const fake = makeFakeEnv({ mode: "hang" });
+  const cwd = makeTempGitRepo();
+
+  const child = spawnSync(
+    process.execPath,
+    [path.join(REPO_ROOT, "plugins", "opencode", "scripts", "opencode-companion.mjs"), "task", "--timeout-ms", "1500", "--", "a run that stalls"],
+    { cwd, env: { ...fake.env, OPENCODE_COMPANION_SESSION_ID: "s1" }, encoding: "utf8", timeout: 30_000 }
+  );
+  assert.equal(child.status, 1, child.stdout);
+
+  // Re-mark it as running with this process as the owner, standing in for a
+  // job that is genuinely still in flight when the session ends.
+  const stateRoot = path.join(fake.stateDir, "state");
+  const storeDir = path.join(stateRoot, fs.readdirSync(stateRoot)[0]);
+  const stateFile = path.join(storeDir, "state.json");
+  const state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  state.jobs = state.jobs.map((job) => ({ ...job, status: "running", childPid: process.pid, sessionId: "s1" }));
+  fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
+
+  const result = runHook({ cwd, session_id: "s1" }, { env: fake.env, cwd });
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.decision, undefined, "the reminder must not block the stop");
+  assert.match(payload.systemMessage, /is still running/);
+  assert.match(payload.systemMessage, /\/opencode:cancel/);
+});

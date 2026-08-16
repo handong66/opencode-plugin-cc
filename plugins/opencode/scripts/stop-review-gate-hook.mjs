@@ -10,7 +10,7 @@ import { collectReviewInput } from "./lib/git.mjs";
 import { getOpencodeAvailability } from "./lib/opencodecli.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import { READY_ENV, SESSION_ID_ENV } from "./lib/session-env.mjs";
-import { getConfig, listJobs, setConfig } from "./lib/state.mjs";
+import { getConfig, listJobs, resolveStateFile, setConfig } from "./lib/state.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
 // Must stay strictly below the Stop hook budget in hooks/hooks.json
@@ -191,6 +191,13 @@ function main() {
 
   const cwd = input.cwd || process.env.CLAUDE_PROJECT_DIR || process.cwd();
   const workspaceRoot = resolveWorkspaceRoot(cwd);
+  // Three of these hooks (grok / opencode / codex) run on every Stop of every
+  // session, and across 40 recorded sessions the gate was enabled in exactly
+  // zero of 25 workspaces. One `existsSync` ends the common case — a workspace
+  // that has never run this plugin has no gate to run and no job to report.
+  if (!fs.existsSync(resolveStateFile(workspaceRoot))) {
+    return;
+  }
   const config = getConfig(workspaceRoot);
   const sessionId = input.session_id || process.env[SESSION_ID_ENV] || null;
 
