@@ -4,7 +4,16 @@ import fs from "node:fs";
 import process from "node:process";
 
 import { terminateProcessTree } from "./lib/process.mjs";
-import { DATA_DIR_ENV, PLUGIN_DATA_ENV, SESSION_ID_ENV, TRANSCRIPT_PATH_ENV } from "./lib/session-env.mjs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+import {
+  COMPANION_BIN_ENV,
+  DATA_DIR_ENV,
+  PLUGIN_DATA_ENV,
+  SESSION_ID_ENV,
+  TRANSCRIPT_PATH_ENV
+} from "./lib/session-env.mjs";
 import { listJobs, resolveStateFile, upsertJob } from "./lib/state.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
@@ -34,6 +43,11 @@ function handleSessionStart(input) {
   // CLAUDE_PLUGIN_DATA into the shared env file would clobber other plugins
   // (and they clobber us) since the last SessionStart hook to run wins.
   appendEnvVar(DATA_DIR_ENV, process.env[PLUGIN_DATA_ENV]);
+  // The entry point of the *running* copy, resolved from this file rather than
+  // assembled from a version number. Without it callers hard-coded versioned
+  // cache paths, and one session spent 3.5 hours pinned to a stale 0.1.0 copy
+  // it had found with `find | head -1`.
+  appendEnvVar(COMPANION_BIN_ENV, path.join(path.dirname(fileURLToPath(import.meta.url)), "opencode-companion.mjs"));
 }
 
 // Terminate this session's still-running jobs but keep their records so

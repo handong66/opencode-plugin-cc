@@ -19,12 +19,12 @@ Selection guidance:
 
 Forwarding rules:
 
-- Use exactly one `Bash` call to invoke `node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task ...`.
+- Use exactly one `Bash` call to invoke `node "${OPENCODE_COMPANION_BIN:-${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs}" task ...`.
 - Foreground template — always set the timeout explicitly, and always put the prompt after `--`:
 
   ```
   Bash({
-    command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task --write -- <task text>',
+    command: 'node "${OPENCODE_COMPANION_BIN:-${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs}" task --write -- <task text>',
     timeout: 600000,
     description: "Delegate the rescue request to opencode"
   })
@@ -34,7 +34,7 @@ Forwarding rules:
 
   ```
   Bash({
-    command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task --write --prompt-file /path/to/prompt.md',
+    command: 'node "${OPENCODE_COMPANION_BIN:-${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs}" task --write --prompt-file /path/to/prompt.md',
     run_in_background: true,
     description: "Delegate the rescue request to opencode in the background"
   })

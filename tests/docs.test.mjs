@@ -102,3 +102,30 @@ test("rescue docs keep --background as a Claude-side flag, not a companion flag"
   assert.match(skill, /Strip it before calling `task`/);
   assert.doesNotMatch(skill, /opencode-companion\.mjs" task --background/);
 });
+
+// X5/PC9: orchestrators hard-coded `.../opencode/0.1.0/scripts/...`, guessed a
+// path that did not exist, and then `find | head -1`'d their way onto a stale
+// copy — which they then used for 3.5 hours while its job state went into
+// another plugin's directory.
+test("rescue docs route through the exported entry point, never a versioned path", () => {
+  for (const [name, text] of [
+    ["skills/opencode-cli-runtime/SKILL.md", readDoc("skills", "opencode-cli-runtime", "SKILL.md")],
+    ["agents/opencode-rescue.md", readDoc("agents", "opencode-rescue.md")]
+  ]) {
+    assert.match(
+      text,
+      /\$\{OPENCODE_COMPANION_BIN:-\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/opencode-companion\.mjs\}/,
+      `${name} must use the exported entry point with a plugin-root fallback`
+    );
+    assert.doesNotMatch(
+      text,
+      /plugins\/(?:cache|marketplaces)[^\s`'"]*\d+\.\d+\.\d+/,
+      `${name} must not contain a versioned cache path`
+    );
+  }
+  assert.match(
+    readDoc("skills", "opencode-cli-runtime", "SKILL.md"),
+    /never `find \| head -1`/i,
+    "the skill must ban path guessing outright"
+  );
+});

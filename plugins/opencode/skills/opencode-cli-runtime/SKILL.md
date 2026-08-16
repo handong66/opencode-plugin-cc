@@ -9,7 +9,7 @@ user-invocable: false
 Use this skill only inside the `opencode:opencode-rescue` subagent.
 
 Primary helper:
-- `node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task [flags] -- <prompt>`
+- `node "${OPENCODE_COMPANION_BIN:-${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs}" task [flags] -- <prompt>`
 - or, for any prompt containing quotes, backticks, angle brackets, pipes or newlines: `task [flags] --prompt-file <path>`
 
 Prompt form rules:
@@ -21,7 +21,7 @@ Invocation template (always set the Bash timeout explicitly):
 
 ```
 Bash({
-  command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task --write -- <prompt>',
+  command: 'node "${OPENCODE_COMPANION_BIN:-${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs}" task --write -- <prompt>',
   timeout: 600000,
   description: "Delegate the rescue request to opencode"
 })
@@ -31,11 +31,16 @@ For a long or open-ended rescue, detach instead of waiting:
 
 ```
 Bash({
-  command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task --write --prompt-file /path/to/prompt.md',
+  command: 'node "${OPENCODE_COMPANION_BIN:-${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs}" task --write --prompt-file /path/to/prompt.md',
   run_in_background: true,
   description: "Delegate the rescue request to opencode in the background"
 })
 ```
+
+Entry point rules:
+- Always reach the companion through `${OPENCODE_COMPANION_BIN:-${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs}`. `OPENCODE_COMPANION_BIN` is exported by this plugin's SessionStart hook and points at the copy that is actually installed; `${CLAUDE_PLUGIN_ROOT}` is the fallback when the session env file was not sourced.
+- Never write a versioned absolute cache path (`~/.claude/plugins/.../opencode/0.1.0/scripts/...`), never guess a path, and never `find | head -1` for one. A caller that did all three ran a stale copy of this plugin for 3.5 hours, and its job state went to another plugin's directory the whole time.
+- `/opencode:setup --json` reports `pluginVersion` and `companionPath` if you need to confirm which copy answered.
 
 Timeout rules:
 - opencode runs regularly take longer than two minutes (typical 2-6 minutes for read-only reviews on the plan agent), so the Claude Code default of 120000 ms cuts a large share of them off mid-run with `Exit code 143`.

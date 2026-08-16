@@ -32,7 +32,7 @@ import {
   renderTaskFailure,
   renderTaskOutput
 } from "./lib/render.mjs";
-import { READY_ENV, SESSION_ID_ENV, TRANSCRIPT_PATH_ENV } from "./lib/session-env.mjs";
+import { COMPANION_BIN_ENV, READY_ENV, SESSION_ID_ENV, TRANSCRIPT_PATH_ENV } from "./lib/session-env.mjs";
 import {
   describeStateLocation,
   findJob,
@@ -50,6 +50,7 @@ import {
 } from "./lib/state.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const COMPANION_PATH = fileURLToPath(import.meta.url);
 const ROOT_DIR = path.resolve(SCRIPT_DIR, "..");
 const REVIEW_SCHEMA_PATH = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
 const REVIEW_RULES =
@@ -146,6 +147,65 @@ function requireOpencodeReady({ asJson }) {
 
 function loadReviewSchema() {
   return JSON.parse(fs.readFileSync(REVIEW_SCHEMA_PATH, "utf8"));
+}
+
+// X5: which copy of the plugin is running. Callers hard-coded versioned cache
+// paths (`.../opencode/0.1.0/scripts/...`) and guessed at layouts; one session
+// spent 3.5 hours pinned to a stale copy without knowing it. Reported wherever
+// somebody debugging that would look.
+let cachedVersion;
+function pluginVersion() {
+  if (cachedVersion === undefined) {
+    try {
+      cachedVersion = JSON.parse(
+        fs.readFileSync(path.join(ROOT_DIR, ".claude-plugin", "plugin.json"), "utf8")
+      ).version ?? null;
+    } catch {
+      cachedVersion = null;
+    }
+  }
+  return cachedVersion;
+}
+
+function compareVersions(left, right) {
+  const parse = (value) => String(value).split(/[.+-]/).map((part) => Number(part) || 0);
+  const [a, b] = [parse(left), parse(right)];
+  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+    if ((a[index] ?? 0) !== (b[index] ?? 0)) {
+      return (a[index] ?? 0) - (b[index] ?? 0);
+    }
+  }
+  return 0;
+}
+
+// A newer copy sitting next to this one in the plugin cache means the caller
+// reached this file by a versioned path or a `find`, not by the entry point the
+// SessionStart hook exports.
+function describeNewerInstall() {
+  const version = pluginVersion();
+  if (!version) {
+    return null;
+  }
+  // .../<cache>/<plugin>/<version>/plugins/opencode → the version dir is 3 up.
+  const versionDir = path.resolve(ROOT_DIR, "..", "..");
+  const siblingRoot = path.dirname(versionDir);
+  if (path.basename(versionDir) !== version) {
+    return null;
+  }
+  let siblings = [];
+  try {
+    siblings = fs.readdirSync(siblingRoot);
+  } catch {
+    return null;
+  }
+  const newer = siblings
+    .filter((entry) => /^\d+\.\d+/.test(entry) && compareVersions(entry, version) > 0)
+    .sort(compareVersions)
+    .at(-1);
+  if (!newer) {
+    return null;
+  }
+  return `a newer install of this plugin exists (${newer}) but you are running ${version} from ${ROOT_DIR}. Use $${COMPANION_BIN_ENV} (exported at SessionStart) or "\${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" instead of a versioned path.`;
 }
 
 // `--background` used to be consumed silently so it could not leak into the
@@ -324,7 +384,7 @@ async function executeJob({
   // caller who detaches the companion with Bash(run_in_background: true) — 28
   // recorded times — otherwise has no id to poll until the run is already over.
   // In --json mode it goes to stderr so stdout stays a single JSON document.
-  const handle = { jobId, logFile, pollWith: `/opencode:status ${jobId}` };
+  const handle = { jobId, logFile, pollWith: `/opencode:status ${jobId}`, companionVersion: pluginVersion() };
   if (asJson) {
     process.stderr.write(`${JSON.stringify(handle)}\n`);
   } else {
@@ -817,6 +877,8 @@ function commandSetup(tokens) {
     credentialCount: availability.credentialCount ?? 0,
     usable: Boolean(availability.usable),
     version: availability.version ?? null,
+    pluginVersion: pluginVersion(),
+    companionPath: COMPANION_PATH,
     defaultModel,
     readOnlyModel,
     readOnlyAgent: "plan",
@@ -855,6 +917,7 @@ function commandSetup(tokens) {
     );
   }
   lines.push(`Node: ${process.version}`);
+  lines.push(`Plugin: opencode ${pluginVersion() ?? "unknown"} (${COMPANION_PATH})`);
   lines.push(
     `Stop-time review gate: ${gateEnabled ? "enabled" : "disabled"} (toggle with /opencode:setup --enable-review-gate | --disable-review-gate)`
   );
@@ -1295,14 +1358,22 @@ const SUBCOMMAND_HELP = {
 };
 
 function commandHelp(subcommand = null) {
+  const outdated = describeNewerInstall();
+  if (outdated) {
+    process.stderr.write(`warning: ${outdated}\n`);
+  }
   const perCommand = SUBCOMMAND_HELP[subcommand];
   if (perCommand) {
-    print([`opencode-companion ${subcommand}`, "", ...perCommand].join("\n"));
+    print(
+      [`opencode-companion ${subcommand} (plugin ${pluginVersion() ?? "unknown"})`, "", ...perCommand].join("\n")
+    );
     return;
   }
   print(
     [
-      "opencode-companion — helper runtime for the opencode Claude Code plugin",
+      `opencode-companion ${pluginVersion() ?? "unknown"} — helper runtime for the opencode Claude Code plugin`,
+      `Running from: ${COMPANION_PATH}`,
+      `Job store:    ${resolveStateDir(process.cwd())}`,
       "",
       "Subcommands (run `<subcommand> --help` for its flags):",
       "  setup [--json] [--enable-review-gate|--disable-review-gate]",

@@ -3,7 +3,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 
-import { makeFakeEnv, makeTempDir, makeTempGitRepo, runCompanion } from "./helpers.mjs";
+import { spawnSync } from "node:child_process";
+
+import { makeFakeEnv, makeTempDir, makeTempGitRepo, REPO_ROOT, runCompanion } from "./helpers.mjs";
 
 // M2/PC7: 0.1.1 added the namespaced env var but kept `CLAUDE_PLUGIN_DATA` as a
 // fallback, and that name holds whichever plugin's SessionStart hook ran last —
@@ -110,4 +112,42 @@ test("an empty store says so instead of listing nothing", () => {
   const result = runCompanion(["status", "task-nope"], { env: fake.env, cwd: makeTempDir("opencode-empty-ws") });
   assert.equal(result.status, 1);
   assert.match(result.stdout, /This store holds no jobs at all/);
+});
+
+// X5/PC9: the caller must be able to answer "which copy of the plugin is this,
+// and where is its job store" without `find`ing the filesystem.
+test("setup and --help name the running copy and its job store", () => {
+  const fake = makeFakeEnv();
+  const cwd = makeTempGitRepo();
+
+  const report = JSON.parse(runCompanion(["setup", "--json"], { env: fake.env, cwd }).stdout);
+  assert.match(report.pluginVersion, /^\d+\.\d+\.\d+$/);
+  assert.match(report.companionPath, /scripts\/opencode-companion\.mjs$/);
+  assert.ok(report.stateDir.startsWith(fake.stateDir));
+
+  const help = runCompanion(["--help"], { env: fake.env, cwd });
+  assert.match(help.stdout, new RegExp(`opencode-companion ${report.pluginVersion.replace(/\./g, "\\.")}`));
+  assert.match(help.stdout, /Running from: .*opencode-companion\.mjs/);
+  assert.match(help.stdout, /Job store:/);
+});
+
+// The SessionStart hook must publish that path, so nobody has to guess it.
+test("SessionStart exports the companion entry point", () => {
+  const fake = makeFakeEnv();
+  const cwd = makeTempGitRepo();
+  const envFile = path.join(makeTempDir("opencode-env-file"), "env.sh");
+  fs.writeFileSync(envFile, "");
+
+  const hook = path.join(REPO_ROOT, "plugins", "opencode", "scripts", "session-lifecycle-hook.mjs");
+  const result = spawnSync(process.execPath, [hook, "SessionStart"], {
+    cwd,
+    env: { ...fake.env, CLAUDE_ENV_FILE: envFile, CLAUDE_PLUGIN_DATA: fake.stateDir },
+    input: JSON.stringify({ session_id: "s1", cwd }),
+    encoding: "utf8"
+  });
+  assert.equal(result.status, 0, result.stderr);
+
+  const exported = fs.readFileSync(envFile, "utf8");
+  assert.match(exported, /export OPENCODE_COMPANION_BIN='.*scripts\/opencode-companion\.mjs'/);
+  assert.match(exported, /export OPENCODE_COMPANION_DATA_DIR=/);
 });

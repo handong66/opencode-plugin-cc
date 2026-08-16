@@ -10,3 +10,9 @@ export const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
 // --version` + `opencode auth list`, ~1.1s) so the child does not repeat it.
 // Only ever set by this plugin's own hooks for a process they spawn.
 export const READY_ENV = "OPENCODE_COMPANION_READY";
+// Absolute path to this plugin's companion script, exported at SessionStart so
+// callers never have to guess it. Orchestrators hard-coded a versioned cache
+// path (`.../opencode/0.1.0/scripts/...`), guessed one that did not exist, and
+// fell back to `find | head -1` — which pinned a session to an old version for
+// 3.5 hours. Falls back to ${CLAUDE_PLUGIN_ROOT} when the env file was not read.
+export const COMPANION_BIN_ENV = "OPENCODE_COMPANION_BIN";
