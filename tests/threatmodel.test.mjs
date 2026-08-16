@@ -39,6 +39,15 @@ test("--threat-model reaches the reviewer, and its absence has a stated default"
   const prompt = readRunArgs(fake).at(-1);
   assert.match(prompt, /No threat model was supplied by the caller/);
   assert.match(prompt, /single-user local application/);
+  assert.match(prompt, /no network exposure/);
+  // The default has to be exactly what README, the two skills, the slash
+  // command and the changelog all promise it is. It carried an extra "and no
+  // untrusted input" clause that appears in none of them — and it is false of
+  // this runtime, whose inputs are caller flags, `--prompt-file` contents, git
+  // remotes and repository files. Under that clause the reviewer is entitled
+  // to push every argument-handling and untrusted-diff finding out of model,
+  // where the prompt then forbids it from producing `needs-attention`.
+  assert.doesNotMatch(prompt, /untrusted input/);
 });
 
 // Plain `review` shared the flag spec, so it accepted --threat-model, escaped

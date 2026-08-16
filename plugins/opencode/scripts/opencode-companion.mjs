@@ -758,8 +758,17 @@ const REVIEW_SCOPES = ["auto", "working-tree", "branch"];
 // findings against a single-user local tool, and those findings then interrupt
 // the user's actual task. The user's own words: "please stop interrupting my
 // task" — so the boundary is an input, and out-of-model findings are advisory.
+//
+// Exactly what README, both skills, the slash command and the changelog say the
+// default is, and no more. It used to add "and no untrusted input", a clause
+// none of them mention and one that is false of this runtime: its inputs are
+// caller flags, `--prompt-file` contents, git remotes and repository files.
+// Granted that clause, a reviewer could push every argument-handling, path and
+// untrusted-diff finding out of model — where the prompt then forbids it from
+// producing `needs-attention`, silently narrowing the review this command exists
+// to perform.
 const DEFAULT_THREAT_MODEL =
-  "No threat model was supplied by the caller. Unless the repository itself says otherwise, assume a single-user local application with no network exposure and no untrusted input.";
+  "No threat model was supplied by the caller. Unless the repository itself says otherwise, assume a single-user local application with no network exposure.";
 const REVIEW_VALUE_FLAGS = [
   "--base",
   "--head",
