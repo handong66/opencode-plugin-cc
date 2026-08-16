@@ -3,10 +3,16 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { isAlive } from "./process.mjs";
 import { DATA_DIR_ENV, PLUGIN_DATA_ENV } from "./session-env.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 const STATE_VERSION = 1;
+// How long a running record may go without a pid before it counts as dead.
+// Wide enough to cover the gap between `upsertJob(running)` and `onSpawn`.
+export const ORPHAN_GRACE_MS = 120_000;
+const ORPHAN_SUMMARY =
+  "process exited without writing a result (companion was killed or the machine restarted)";
 const FALLBACK_STATE_ROOT_DIR = path.join(os.tmpdir(), "opencode-companion");
 const STATE_FILE_NAME = "state.json";
 const JOBS_DIR_NAME = "jobs";
@@ -94,7 +100,17 @@ function removeFileIfExists(filePath) {
 export function saveState(cwd, state) {
   const previousJobs = loadState(cwd).jobs;
   ensureStateDir(cwd);
-  const nextJobs = pruneJobs(state.jobs ?? []);
+  // Union the caller's (possibly stale) snapshot with what is on disk right
+  // now, caller version winning per id. Without this, a concurrent writer's
+  // jobs look "removed" to us and their payload and log file get unlinked
+  // while their run is still streaming into it.
+  const merged = new Map((state.jobs ?? []).map((job) => [job.id, job]));
+  for (const job of previousJobs) {
+    if (!merged.has(job.id)) {
+      merged.set(job.id, job);
+    }
+  }
+  const nextJobs = pruneJobs([...merged.values()]);
   const nextState = {
     version: STATE_VERSION,
     config: {
@@ -148,12 +164,81 @@ export function upsertJob(cwd, jobPatch) {
   });
 }
 
-export function listJobs(cwd) {
-  return loadState(cwd).jobs;
+// Terminal states are only ever written by the process that owns the run, so a
+// companion killed mid-run (Bash timeout, SIGTERM, machine restart) leaves its
+// record frozen at `running` forever — `status --wait` then burns its whole
+// budget re-reading it and the rendered elapsed time grows without bound.
+// This relabels such records. It never signals anything: killing stays with
+// `cancel` and the SessionEnd hook.
+export function reconcileJobs(jobs, { now = Date.now(), graceMs = ORPHAN_GRACE_MS, alive = isAlive } = {}) {
+  let changed = false;
+  const reconciled = jobs.map((job) => {
+    if (job.status !== "running" && job.status !== "queued") {
+      return job;
+    }
+
+    const pid = Number(job.childPid);
+    const hasPid = Number.isFinite(pid) && pid > 0;
+    const lastSeen = Date.parse(job.updatedAt ?? job.startedAt ?? job.createdAt ?? "");
+    // No pid yet means either the spawn gap (a live companion, milliseconds
+    // wide) or a companion that died before it could record one.
+    const dead = hasPid ? !alive(pid) : Number.isFinite(lastSeen) && now - lastSeen > graceMs;
+    if (!dead) {
+      return job;
+    }
+
+    changed = true;
+    const startedAt = Date.parse(job.startedAt ?? job.createdAt ?? "");
+    const frozenDuration =
+      Number.isFinite(startedAt) && Number.isFinite(lastSeen) && lastSeen >= startedAt
+        ? lastSeen - startedAt
+        : job.durationMs ?? null;
+    return {
+      ...job,
+      status: "failed",
+      failureClass: "orphaned",
+      endedAt: job.endedAt ?? new Date(Number.isFinite(lastSeen) ? lastSeen : now).toISOString(),
+      durationMs: frozenDuration,
+      summary: ORPHAN_SUMMARY
+    };
+  });
+
+  return { jobs: reconciled, changed };
 }
 
-export function findJob(cwd, jobId) {
-  return listJobs(cwd).find((job) => job.id === jobId) ?? null;
+// Writes the relabelling back, but re-reads first and only touches records that
+// are *still* running/queued, so a run that reached a terminal state between
+// the read and the write keeps its own verdict.
+function persistReconciliation(cwd, reconciled) {
+  const patches = new Map(reconciled.filter((job) => job.failureClass === "orphaned").map((job) => [job.id, job]));
+  if (patches.size === 0) {
+    return;
+  }
+  updateState(cwd, (state) => {
+    state.jobs = state.jobs.map((job) => {
+      const patch = patches.get(job.id);
+      if (!patch || (job.status !== "running" && job.status !== "queued")) {
+        return job;
+      }
+      return { ...job, ...patch };
+    });
+  });
+}
+
+export function listJobs(cwd, { reconcile = true } = {}) {
+  const jobs = loadState(cwd).jobs;
+  if (!reconcile) {
+    return jobs;
+  }
+  const result = reconcileJobs(jobs);
+  if (result.changed) {
+    persistReconciliation(cwd, result.jobs);
+  }
+  return result.jobs;
+}
+
+export function findJob(cwd, jobId, { reconcile = true } = {}) {
+  return listJobs(cwd, { reconcile }).find((job) => job.id === jobId) ?? null;
 }
 
 export function setConfig(cwd, key, value) {

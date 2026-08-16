@@ -7,7 +7,7 @@ function signalTarget(target, signal) {
   }
 }
 
-function isAlive(pid) {
+export function isAlive(pid) {
   try {
     process.kill(pid, 0);
     return true;

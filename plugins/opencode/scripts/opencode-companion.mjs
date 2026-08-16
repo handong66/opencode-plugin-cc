@@ -141,7 +141,9 @@ async function executeJob({ kind, cwd, opencodeOptions, promptPreview, model = n
 
   // `cancel` (or session teardown) may have marked the job while opencode was
   // being killed; that terminal state wins over the exit-code verdict.
-  const wasCancelled = findJob(cwd, jobId)?.status === "cancelled";
+  // Reconciliation is skipped here: this process owns the run and is about to
+  // write the real verdict, so the just-exited child must not read as orphaned.
+  const wasCancelled = findJob(cwd, jobId, { reconcile: false })?.status === "cancelled";
   const job = {
     id: jobId,
     kind,
@@ -163,7 +165,7 @@ async function executeJob({ kind, cwd, opencodeOptions, promptPreview, model = n
           : `failed (exit ${outcome.exitCode ?? "?"})`
   };
 
-  const fullJob = { ...findJob(cwd, jobId), ...job };
+  const fullJob = { ...findJob(cwd, jobId, { reconcile: false }), ...job };
   payload.rendered = ok
     ? kind === "review" || kind === "adversarial-review"
       ? renderReviewOutput(fullJob, payload)
@@ -452,6 +454,9 @@ async function commandStatus(tokens) {
     if (flags.has("--wait")) {
       const timeoutMs = Number(flags.get("--timeout-ms")) || STATUS_WAIT_DEFAULT_TIMEOUT_MS;
       const deadline = Date.now() + timeoutMs;
+      // findJob reconciles, so a job whose process died returns a terminal
+      // status and this loop stops immediately instead of waiting out the
+      // whole budget on a record that can never change again.
       while ((job.status === "running" || job.status === "queued") && Date.now() < deadline) {
         await sleep(STATUS_WAIT_POLL_MS);
         job = findJob(cwd, jobId) ?? job;
@@ -525,7 +530,8 @@ function commandCancel(tokens) {
     return;
   }
   if (!["running", "queued"].includes(job.status)) {
-    print(`Job ${job.id} is already ${job.status}; nothing to cancel.`);
+    const status = job.failureClass ? `${job.status} (${job.failureClass})` : job.status;
+    print(`Job ${job.id} is already ${status}; nothing to cancel.`);
     return;
   }
 

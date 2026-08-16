@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 
-import { makeFakeEnv, makeTempGitRepo, readRunArgs, runCompanion } from "./helpers.mjs";
+import { REPO_ROOT, makeFakeEnv, makeTempGitRepo, readRunArgs, runCompanion } from "./helpers.mjs";
+
+const STATE_MODULE = path.join(REPO_ROOT, "plugins", "opencode", "scripts", "lib", "state.mjs");
 
 test("setup --json reports a ready fake opencode", () => {
   const fake = makeFakeEnv();
@@ -132,6 +136,63 @@ test("narration after tool calls is incomplete and keeps the partial output plus
   assert.match(rendered, /Parent contracts read\. Now the source files\./);
   assert.match(rendered, /external_directory/, "the auto-rejected path must be visible");
   assert.match(rendered, /incomplete/);
+});
+
+// P-LIVENESS: a companion killed mid-run (Bash timeout, SIGTERM) never writes a
+// terminal state, so its record used to read `running` forever — one was still
+// counting at 201 minutes three hours after its process had exited.
+test("status stops reporting a job as running once its process is gone", () => {
+  const fake = makeFakeEnv();
+  const cwd = makeTempGitRepo();
+
+  // A finished run first, so the store has a live-looking neighbour record.
+  runCompanion(["task", "--json", "--write", "warm up the store"], { env: fake.env, cwd });
+
+  const dead = spawnSync(process.execPath, ["-e", ""], { encoding: "utf8" });
+  const orphanScript = `
+    const { upsertJob } = await import(${JSON.stringify(STATE_MODULE)});
+    upsertJob(${JSON.stringify(cwd)}, {
+      id: "task-orphan-e2e",
+      kind: "task",
+      status: "running",
+      cwd: ${JSON.stringify(cwd)},
+      childPid: ${dead.pid},
+      promptPreview: "you are the director verification rehearsal",
+      startedAt: new Date(Date.now() - 201 * 60 * 1000).toISOString()
+    });
+  `;
+  const seeded = spawnSync(process.execPath, ["--input-type=module", "-e", orphanScript], {
+    env: fake.env,
+    encoding: "utf8"
+  });
+  assert.equal(seeded.status, 0, seeded.stderr);
+
+  const status = runCompanion(["status", "--json", "--all"], { env: fake.env, cwd });
+  const orphan = JSON.parse(status.stdout).jobs.find((job) => job.id === "task-orphan-e2e");
+  assert.equal(orphan.status, "failed");
+  assert.equal(orphan.failureClass, "orphaned");
+
+  const table = runCompanion(["status", "--all"], { env: fake.env, cwd }).stdout;
+  assert.match(table, /task-orphan-e2e \| task \| failed \(orphaned\)/);
+  assert.doesNotMatch(table, /task-orphan-e2e \| task \| running/);
+
+  const detail = runCompanion(["status", "task-orphan-e2e"], { env: fake.env, cwd }).stdout;
+  assert.match(detail, /Status: failed \(orphaned\)/);
+  assert.match(detail, /\/opencode:rescue --resume/);
+
+  // `--wait` must return at once instead of burning the whole 15-minute budget
+  // re-reading a record that can never change again.
+  const startedAt = Date.now();
+  const waited = runCompanion(["status", "task-orphan-e2e", "--wait", "--json"], { env: fake.env, cwd });
+  assert.equal(JSON.parse(waited.stdout).job.status, "failed");
+  assert.ok(Date.now() - startedAt < 10_000, "status --wait must not poll a dead job");
+
+  const cancelled = runCompanion(["cancel", "task-orphan-e2e"], { env: fake.env, cwd });
+  assert.match(cancelled.stdout, /already failed \(orphaned\); nothing to cancel/);
+
+  // The completed neighbour keeps its own verdict.
+  const jobs = JSON.parse(runCompanion(["status", "--json", "--all"], { env: fake.env, cwd }).stdout).jobs;
+  assert.equal(jobs.filter((job) => job.status === "completed").length, 1);
 });
 
 test("silent runs (no events) are treated as failures", () => {

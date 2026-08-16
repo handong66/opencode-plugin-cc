@@ -147,12 +147,15 @@ export function renderJobList(jobs, { gateEnabled = false } = {}) {
   }
   lines.push("", "id | kind | status | elapsed | summary");
   for (const job of jobs) {
+    // Only a job whose process is still alive keeps counting up; an orphaned
+    // record froze when its companion died and must say so.
     const elapsed =
       job.status === "running" || job.status === "queued"
         ? fmtDuration(Date.now() - Date.parse(job.createdAt ?? "") || 0)
         : fmtDuration(job.durationMs);
+    const status = job.failureClass ? `${job.status} (${job.failureClass})` : job.status;
     lines.push(
-      [job.id, job.kind, job.status, elapsed, firstLine(job.summary ?? job.promptPreview ?? "", 80)].join(" | ")
+      [job.id, job.kind, status, elapsed, firstLine(job.summary ?? job.promptPreview ?? "", 80)].join(" | ")
     );
   }
   lines.push("", "Use /opencode:result <id> for finished output, /opencode:cancel <id> to stop a running job.");
@@ -163,7 +166,7 @@ export function renderJobDetail(job, payload, logTail) {
   const lines = [
     `Job: ${job.id}`,
     `Kind: ${job.kind}`,
-    `Status: ${job.status}`,
+    `Status: ${job.failureClass ? `${job.status} (${job.failureClass})` : job.status}`,
     `Created: ${job.createdAt}`,
     `Updated: ${job.updatedAt}`,
     `Duration: ${fmtDuration(job.durationMs)}`
@@ -185,6 +188,13 @@ export function renderJobDetail(job, payload, logTail) {
   }
   if (logTail) {
     lines.push("", "Recent activity:", "```", logTail, "```");
+  }
+  if (job.failureClass === "orphaned") {
+    lines.push(
+      "",
+      `The companion process for this job died before it could store a result.${job.logFile ? ` Partial output may exist in ${job.logFile}.` : ""}`,
+      "Re-run with /opencode:rescue --resume to continue that opencode session."
+    );
   }
   if (payload && ["completed", "failed", "incomplete"].includes(job.status)) {
     lines.push("", "Stored output available. Run /opencode:result " + job.id + " to see it.");
