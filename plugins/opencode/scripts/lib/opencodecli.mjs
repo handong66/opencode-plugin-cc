@@ -446,7 +446,7 @@ export function buildOpencodeArgs({
 //   {"type":"text","sessionID":"ses_...","part":{"id":"prt_...","messageID":"msg_...","type":"text","text":"..."}}
 // Text parts can be re-emitted as they stream, so the last payload per part id
 // wins. The final answer is the text of the newest message that produced any.
-export function parseEventStream(stdout) {
+export function parseEventStream(stdout, { cwd = null } = {}) {
   const events = [];
   for (const line of String(stdout ?? "").split(/\r?\n/)) {
     const trimmed = line.trim();
@@ -498,7 +498,7 @@ export function parseEventStream(stdout) {
     }
     if (event.type === "tool") {
       toolPartIds.add(part.id ?? `tool-${toolPartIds.size}`);
-      const skill = describeSkillUse(part);
+      const skill = describeSkillUse(part, cwd);
       if (skill) {
         skillsLoaded.add(skill);
       }
@@ -554,17 +554,49 @@ function describeEventModel(source) {
 // Two observed shapes: an explicit skill tool call, and a plain read of a
 // SKILL.md — the corpus is full of runs whose *first* action was one or the
 // other (89 of 231 opencode job logs, 57 of 128 grok ones).
-function describeSkillUse(part) {
+//
+// The read shape needs the workspace to mean anything. A `SKILL.md` under the
+// directory the run was pointed at is a file in the repository, and reading it
+// is the work: every plugin repository ships some, so reviewing one used to
+// warn that the delegate had gone off to load a persona instead of doing what
+// it was asked. Only a skill definition *outside* the workspace is the failure
+// mode this warning is about. The explicit tool call is unambiguous wherever it
+// points, and with no workspace to compare against the old, broader reading is
+// kept rather than dropping the signal.
+function describeSkillUse(part, cwd = null) {
   const tool = String(part?.tool ?? part?.name ?? "");
   const input = part?.state?.input ?? part?.input ?? {};
   if (/^skills?$/i.test(tool)) {
     return String(input.name ?? input.skill ?? input.skill_name ?? "skill");
   }
   const target = String(input.filePath ?? input.file_path ?? input.path ?? "");
-  if (/(^|\/)SKILL\.md$/i.test(target)) {
+  if (!/(^|\/)SKILL\.md$/i.test(target)) {
+    return null;
+  }
+  return cwd && isInsideWorkspace(target, cwd) ? null : target;
+}
+
+// Symlinks have to be resolved on both sides or the comparison is decided by
+// which spelling of the same directory each side happened to use — on macOS the
+// run's cwd is `/private/var/folders/…` while the path in the event stream says
+// `/var/folders/…`. A path that does not exist keeps its literal form, which is
+// the right answer for one that was never in the workspace to begin with.
+function canonicalPath(target) {
+  try {
+    return fs.realpathSync(target);
+  } catch {
     return target;
   }
-  return null;
+}
+
+function isInsideWorkspace(target, cwd) {
+  const base = path.resolve(cwd);
+  const root = canonicalPath(base);
+  // A relative path in the event stream is relative to the run's own working
+  // directory, so it is inside by construction.
+  const resolved = canonicalPath(path.resolve(base, target));
+  const relative = path.relative(root, resolved);
+  return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
 // The review contract asks for bare JSON, but models routinely wrap it in
@@ -784,7 +816,7 @@ export function runOpencode(
       } catch {
         // Bookkeeping only; the run's verdict does not depend on it.
       }
-      const stream = parseEventStream(stdout);
+      const stream = parseEventStream(stdout, { cwd });
       // A parsed object is not a review. `extractStructuredJson` will happily
       // return `{"note":"I could not finish"}` (or a JSON fragment lifted out
       // of narration), and the renderer used to turn that into a verdict with

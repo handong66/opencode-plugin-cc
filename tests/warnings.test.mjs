@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { test } from "node:test";
 
 import { makeFakeEnv, makeTempGitRepo, runCompanion } from "./helpers.mjs";
@@ -108,6 +110,46 @@ test("loading an interactive skill is counted and warned about", () => {
     cwd: makeTempGitRepo()
   });
   assert.deepEqual(JSON.parse(quiet.stdout).warnings, [], "a clean run must not warn");
+});
+
+// The other side of that heuristic. Any read of any `SKILL.md` counted as skill
+// loading, so a run pointed at a repository that *ships* skills — this one, and
+// every plugin repo like it — was told it had wandered off to load a persona
+// when it had done exactly the work it was asked to do. A file inside the
+// workspace is material; a skill definition outside it is the failure mode.
+test("reading a SKILL.md that belongs to the repository is not skill loading", () => {
+  const cwd = makeTempGitRepo();
+  const repoSkill = path.join(cwd, "skills", "house-style", "SKILL.md");
+  fs.mkdirSync(path.dirname(repoSkill), { recursive: true });
+  fs.writeFileSync(repoSkill, "# House style\n");
+
+  for (const target of [repoSkill, "skills/house-style/SKILL.md"]) {
+    const fake = makeFakeEnv({
+      extra: { OPENCODE_FAKE_TEXT: "reviewed the skill file", OPENCODE_FAKE_SKILL_READ: target }
+    });
+    const run = runCompanion(["task", "--json", "--write", "review the skills directory"], {
+      env: fake.env,
+      cwd
+    });
+    assert.equal(run.status, 0, run.stderr);
+    assert.deepEqual(
+      JSON.parse(run.stdout).warnings,
+      [],
+      `reading ${target} is repository work, not skill loading`
+    );
+  }
+
+  // A SKILL.md outside the workspace still is.
+  const outside = makeFakeEnv({
+    extra: {
+      OPENCODE_FAKE_TEXT: "eventually",
+      OPENCODE_FAKE_SKILL_READ: "/Users/x/.config/opencode/skills/pua/SKILL.md"
+    }
+  });
+  const flagged = runCompanion(["task", "--json", "--write", "do the work"], { env: outside.env, cwd });
+  const warnings = JSON.parse(flagged.stdout).warnings;
+  assert.deepEqual(warnings.map((warning) => warning.class), ["skills_loaded"]);
+  assert.deepEqual(warnings[0].skills, ["/Users/x/.config/opencode/skills/pua/SKILL.md"]);
 });
 
 // X2: 30 of 64 recorded "succeeded" review jobs opened no file at all, and the

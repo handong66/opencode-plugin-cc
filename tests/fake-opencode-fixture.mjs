@@ -11,6 +11,9 @@
 //   OPENCODE_FAKE_ARGS_FILE  when set, argv is dumped there as JSON
 //   OPENCODE_FAKE_OBSERVED_MODEL  provider/model reported on the assistant
 //                            message, the way a real run reports what ran
+//   OPENCODE_FAKE_SKILL_READ a path this run *reads* as an ordinary file; use
+//                            a SKILL.md inside the workspace to stand in for a
+//                            run reviewing a repository that ships skills
 //   OPENCODE_FAKE_ORPHAN_RACE when set, relabels this run's own job record as
 //                            failed/orphaned just before exiting, standing in
 //                            for a concurrent reader reconciling it in the
@@ -195,6 +198,22 @@ if (args[0] === "run") {
         sessionID,
         tool: "read",
         state: { status: "completed", input: { filePath: "/Users/x/.config/opencode/skills/pua/SKILL.md" } }
+      }
+    });
+  }
+
+  // A run that *reads* a SKILL.md belonging to the repository it was pointed
+  // at — review material, not a skill being loaded.
+  if (process.env.OPENCODE_FAKE_SKILL_READ) {
+    emit({
+      type: "tool",
+      ...base,
+      part: {
+        id: "prt_repo_skill_read",
+        messageID: "msg_fake0123456789",
+        sessionID: "ses_fake0123456789",
+        tool: "read",
+        state: { status: "completed", input: { filePath: process.env.OPENCODE_FAKE_SKILL_READ } }
       }
     });
   }
