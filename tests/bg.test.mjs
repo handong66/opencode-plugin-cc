@@ -151,9 +151,46 @@ test("result --wait blocks until the job finishes, then prints the render", () =
 test("status --wait validates --timeout-ms the same way", () => {
   const fake = makeFakeEnv();
   const cwd = makeTempGitRepo();
-  const result = runCompanion(["status", "any-id", "--wait", "--timeout-ms", "later"], { env: fake.env, cwd });
-  assert.equal(result.status, 1);
-  assert.match(result.stdout + result.stderr, /No job found|--timeout-ms must be a positive number/);
+  const jobId = "task-budget-validation";
+
+  // The check sits inside the `--wait` branch, which `commandStatus` only
+  // reaches for a job that exists — against an empty store `describeMissingJob`
+  // answers first and the validation never runs at all. So the job has to be
+  // real, and the assertion has to name the one message under test.
+  const seed = `
+    const { upsertJob } = await import(${JSON.stringify(STATE_MODULE)});
+    upsertJob(${JSON.stringify(cwd)}, {
+      id: ${JSON.stringify(jobId)},
+      kind: "task",
+      status: "running",
+      cwd: ${JSON.stringify(cwd)},
+      childPid: ${process.pid},
+      promptPreview: "still going",
+      startedAt: new Date().toISOString()
+    });
+  `;
+  const seeded = spawnSync(process.execPath, ["--input-type=module", "-e", seed], {
+    env: fake.env,
+    encoding: "utf8"
+  });
+  assert.equal(seeded.status, 0, seeded.stderr);
+
+  const startedAt = Date.now();
+  const result = runCompanion(["status", jobId, "--wait", "--timeout-ms", "later"], { env: fake.env, cwd });
+  const output = result.stdout + result.stderr;
+  assert.equal(result.status, 1, output);
+  assert.match(output, /--timeout-ms must be a positive number of milliseconds \(got later\)/);
+  assert.doesNotMatch(output, /No job found/, "the job exists, so this must be the budget error");
+  assert.ok(
+    Date.now() - startedAt < 15_000,
+    "an unusable budget must be rejected instead of falling back to the default poll loop"
+  );
+
+  // Pins the other half of the ordering: for an id that is not in the store the
+  // lookup failure is still what the caller is told.
+  const missing = runCompanion(["status", "no-such-job", "--wait", "--timeout-ms", "later"], { env: fake.env, cwd });
+  assert.equal(missing.status, 1);
+  assert.match(missing.stdout + missing.stderr, /No job found with id no-such-job/);
 });
 
 test("result --wait gives up at its deadline instead of hanging", () => {
