@@ -111,6 +111,53 @@ export function classifyOutcome({
   return { ...base, state: "completed", reason: null };
 }
 
+// What to do next, per failure class. The classification never changes the
+// pass/fail verdict — a misread stderr tail must only ever cost a wrong
+// suggestion — so these are printed *above* the untouched stderr block.
+export const FAILURE_CLASS_GUIDANCE = {
+  model_unauthorized:
+    "This account is not authorised for the requested model. Choose a model the provider actually grants, or drop --model and let opencode use its default. Retrying the same model will fail the same way.",
+  model_not_found:
+    "opencode does not recognise that model id — check the provider prefix and its casing (`aihubmix/…`, not `AIHubMix/…`). `opencode models` lists the ids it accepts, and its own `Did you mean:` hint is in the stderr below.",
+  quota_exhausted:
+    "The provider balance or quota is exhausted. Top it up or switch provider — this is not a plugin or prompt problem, and retrying will not help.",
+  auth_required:
+    "opencode has no usable credentials for this provider. Run `!opencode auth login`, then /opencode:setup to confirm before re-running.",
+  provider_error:
+    "The provider returned a server-side error, which is the one class here worth retrying once. If it repeats, switch provider rather than rewording the prompt.",
+  opencode_failed:
+    "opencode exited non-zero without a recognised reason. The stderr tail below is the only evidence; if it is empty, re-run with a narrower task or check `opencode run` by hand."
+};
+
+// Ordered because the tests are substring matches on a noisy tail: an HTTP code
+// is the strongest signal, so 403/402/401 are read before the prose forms.
+const FAILURE_CLASS_PATTERNS = [
+  ["model_unauthorized", /\b403\b|not authorized to access the requested model|unauthorized to (?:use|access) (?:the )?model/i],
+  ["quota_exhausted", /\b402\b|insufficient (?:credit|balance|funds|quota)|credit balance is too low|quota (?:exceeded|exhausted)|out of credits/i],
+  ["auth_required", /\b401\b|no credentials|not authenticated|unauthenticated|authentication required|auth login/i],
+  ["model_not_found", /model not found|did you mean|unknown model|no such model id/i],
+  ["provider_error", /unexpected server error|internal server error|\b5\d\d\s+(?:error|status)/i]
+];
+
+// Classifies *why* a run failed, from the evidence a headless run leaves behind.
+// Returns null for a run that did not fail: the caller keeps `failureClass` free
+// for the companion's own labels (`timeout`, `interrupted`, `orphaned`).
+export function classifyFailure({ exitCode = null, spawnError = null, stderrTail = "", rawOutput = "" } = {}) {
+  if (!spawnError && exitCode === 0) {
+    return null;
+  }
+  if (spawnError) {
+    return "opencode_failed";
+  }
+  const haystack = `${String(stderrTail ?? "")}\n${String(rawOutput ?? "")}`;
+  for (const [failureClass, pattern] of FAILURE_CLASS_PATTERNS) {
+    if (pattern.test(haystack)) {
+      return failureClass;
+    }
+  }
+  return "opencode_failed";
+}
+
 // opencode announces an auto-rejected permission on stderr and still exits 0,
 // e.g. `! permission requested: external_directory (/private/tmp/*);
 // auto-rejecting`. Claude Code stages large prompts and material under

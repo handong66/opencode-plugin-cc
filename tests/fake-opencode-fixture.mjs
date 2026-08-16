@@ -75,7 +75,12 @@ if (args[0] === "run") {
   }
 
   if (mode === "fail") {
-    process.stderr.write("fake provider exploded: no such model\n");
+    // With OPENCODE_FAKE_STDERR the caller is staging a specific provider
+    // error (403 / 402 / Did you mean …); the generic line would only add noise
+    // that the failure classifier then has to see past.
+    if (!process.env.OPENCODE_FAKE_STDERR) {
+      process.stderr.write("fake provider exploded: no such model\n");
+    }
     process.exit(1);
   }
   if (mode === "silent") {

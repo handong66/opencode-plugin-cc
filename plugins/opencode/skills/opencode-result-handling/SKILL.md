@@ -19,7 +19,17 @@ When the helper returns opencode output:
 - For `opencode:opencode-rescue`, if opencode was never successfully invoked, do not generate a substitute answer at all.
 - A single line of the form `OPENCODE_RESCUE_FAILED: <reason> | job=<id> | log=<path>` means the rescue subagent got no opencode answer. Report the reason and the job id to the user as-is; do not answer in opencode's place. If the id is real, `/opencode:status <id>` and `/opencode:result <id>` may still hold the run's output.
 - CRITICAL: After presenting review findings, STOP. Do not make any code changes. Do not fix any issues. You MUST explicitly ask the user which issues, if any, they want fixed before touching a single file. Auto-applying fixes from a review is strictly forbidden, even if the fix is obvious.
-- If the helper reports malformed output or a failed opencode run, include the most actionable stderr lines and stop there instead of guessing.
+- If the helper reports malformed output or a failed opencode run, relay its `Next step (<failureClass>)` line and the stderr tail it printed, then stop instead of guessing.
+
+Failure classes (`failureClass` on the job record and in `--json`; also rendered as `failed (<class>)`):
+- `model_unauthorized` — the account may not use that model. Not retryable as-is: pick a granted model or drop `--model`.
+- `model_not_found` — unknown model id, usually provider-prefix casing. opencode's own `Did you mean:` hint is in the stderr tail.
+- `quota_exhausted` — provider balance or quota is gone. **Not** a plugin or prompt problem and **not** retryable; say so and let the user re-route to another provider rather than re-running.
+- `auth_required` — no usable credentials. Send the user to `/opencode:setup` and `!opencode auth login`; never improvise an alternate auth flow.
+- `provider_error` — server-side error. The only class worth one retry.
+- `opencode_failed` — nothing recognisable. Report the stderr tail as-is.
+- `timeout` / `interrupted` / `orphaned` are the companion's own labels (deadline hit, companion killed, process gone), not provider verdicts.
+- A class is a reading aid derived from stderr text. It never changes whether the run passed or failed, so never present it as more certain than the stderr it came from.
 
 Evidence behind a review verdict:
 - `review` / `adversarial-review` report `evidenceLevel` (`none` | `thin` | `substantive`) next to the verdict and in `--json`. It is derived from how many tool calls the run made.

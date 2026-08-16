@@ -1,3 +1,5 @@
+import { FAILURE_CLASS_GUIDANCE } from "./opencodecli.mjs";
+
 const SEVERITY_ORDER = { critical: 0, high: 1, medium: 2, low: 3 };
 
 export function fmtDuration(ms) {
@@ -115,6 +117,13 @@ export function renderTaskFailure(job, payload) {
   }
   if (payload.spawnError) {
     lines.push(`Spawn error: ${payload.spawnError}`);
+  }
+  // One line of "what to do about it" ahead of the raw tail. The tail is still
+  // printed in full below: the class is a reading aid, never a replacement, and
+  // a wrong class must cost nothing more than a wrong suggestion.
+  const guidance = FAILURE_CLASS_GUIDANCE[job?.failureClass ?? payload.failureClass];
+  if (guidance) {
+    lines.push("", `Next step (${job?.failureClass ?? payload.failureClass}): ${guidance}`);
   }
   lines.push(...warningBlock(payload.warnings));
   lines.push(...stderrBlock(payload.stderrTail, 15));

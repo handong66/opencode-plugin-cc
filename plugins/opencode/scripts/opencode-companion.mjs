@@ -10,6 +10,7 @@ import { tokenize, parseFlags, splitAtSentinel } from "./lib/args.mjs";
 import { extractClaudeMessages, buildHandoffTranscript } from "./lib/claude-transcript.mjs";
 import { collectReviewInput } from "./lib/git.mjs";
 import {
+  classifyFailure,
   classifyOutcome,
   detectPermissionWarnings,
   getOpencodeAvailability,
@@ -420,13 +421,26 @@ async function executeJob({
   // Reconciliation is skipped here: this process owns the run and is about to
   // write the real verdict, so the just-exited child must not read as orphaned.
   const wasCancelled = findJob(cwd, jobId, { reconcile: false })?.status === "cancelled";
+  // A real verdict clears any label reconciliation wrote while this run was in
+  // flight; `upsertJob` merges, so omitting the key would keep it. The
+  // companion's own reason (it stopped the run) wins over the provider's.
+  const failureClass =
+    wasCancelled || ok || incomplete
+      ? null
+      : payload.timedOut
+        ? "timeout"
+        : classifyFailure({
+            exitCode: outcome.exitCode,
+            spawnError: outcome.spawnError,
+            stderrTail: outcome.stderrTail,
+            rawOutput: payload.rawOutput
+          });
+  payload.failureClass = failureClass;
   const job = {
     id: jobId,
     kind,
     status: wasCancelled ? "cancelled" : ok ? "completed" : incomplete ? "incomplete" : "failed",
-    // A real verdict clears any label reconciliation wrote while this run was
-    // in flight; `upsertJob` merges, so omitting the key would keep it.
-    failureClass: !wasCancelled && !ok && !incomplete && payload.timedOut ? "timeout" : null,
+    failureClass,
     outputState: classification.state,
     outputStateReason: classification.reason,
     stopReason: payload.stopReason,
@@ -580,6 +594,7 @@ async function commandTask(tokens) {
       outputState,
       outputStateReason: payload.outputStateReason,
       resultComplete: payload.resultComplete,
+      failureClass: payload.failureClass,
       stopReason: payload.stopReason,
       toolEventCount: payload.toolEventCount,
       evidenceLevel: payload.evidenceLevel,
@@ -671,6 +686,7 @@ async function commandReview(tokens, { adversarial }) {
       outputState,
       outputStateReason: payload.outputStateReason,
       resultComplete: payload.resultComplete,
+      failureClass: payload.failureClass,
       stopReason: payload.stopReason,
       toolEventCount: payload.toolEventCount,
       evidenceLevel: payload.evidenceLevel,
