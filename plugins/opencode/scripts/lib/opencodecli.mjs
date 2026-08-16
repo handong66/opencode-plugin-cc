@@ -263,6 +263,10 @@ export function parseEventStream(stdout) {
   let stopReason = null;
   const textPartsByMessage = new Map();
   const messageOrder = [];
+  // Headless delegates obey repository bootstrap files that tell every agent to
+  // load an interactive skill/persona first. That is invisible in the answer and
+  // shows up only as turns and wall time, so it is counted here.
+  const skillsLoaded = new Set();
   // Tool parts stream one event per state change (pending/running/completed),
   // so count distinct part ids — the interesting number is "did this run do
   // work", not how chatty the stream was.
@@ -279,6 +283,10 @@ export function parseEventStream(stdout) {
     }
     if (event.type === "tool") {
       toolPartIds.add(part.id ?? `tool-${toolPartIds.size}`);
+      const skill = describeSkillUse(part);
+      if (skill) {
+        skillsLoaded.add(skill);
+      }
     }
     if (event.type === "text" && typeof part.text === "string") {
       const messageId = part.messageID ?? "message";
@@ -296,7 +304,30 @@ export function parseEventStream(stdout) {
     ? [...textPartsByMessage.get(lastMessageId).values()].join("\n\n").trim()
     : "";
 
-  return { text, sessionId, stopReason, eventCount: events.length, toolEventCount: toolPartIds.size };
+  return {
+    text,
+    sessionId,
+    stopReason,
+    eventCount: events.length,
+    toolEventCount: toolPartIds.size,
+    skillsLoaded: [...skillsLoaded]
+  };
+}
+
+// Two observed shapes: an explicit skill tool call, and a plain read of a
+// SKILL.md — the corpus is full of runs whose *first* action was one or the
+// other (89 of 231 opencode job logs, 57 of 128 grok ones).
+function describeSkillUse(part) {
+  const tool = String(part?.tool ?? part?.name ?? "");
+  const input = part?.state?.input ?? part?.input ?? {};
+  if (/^skills?$/i.test(tool)) {
+    return String(input.name ?? input.skill ?? input.skill_name ?? "skill");
+  }
+  const target = String(input.filePath ?? input.file_path ?? input.path ?? "");
+  if (/(^|\/)SKILL\.md$/i.test(target)) {
+    return target;
+  }
+  return null;
 }
 
 // The review contract asks for bare JSON, but models routinely wrap it in
@@ -456,6 +487,7 @@ export function runOpencode(
             sessionId: stream.sessionId,
             stopReason: stream.stopReason,
             toolEventCount: stream.toolEventCount,
+            skillsLoaded: stream.skillsLoaded ?? [],
             structuredOutput: options.jsonSchema ? extractStructuredJson(stream.text) : null
           }
         : null;

@@ -315,6 +315,17 @@ async function executeJob({
   // Typed, actionable warnings derived from what opencode said on stderr while
   // still exiting 0 — chiefly an auto-rejected read of a path outside the repo.
   const warnings = detectPermissionWarnings(outcome.stderrTail, { cwd });
+  // X1: a headless delegate that opens by loading an interactive skill spends
+  // turns and wall time on it before any of the requested work happens. The
+  // prompt preamble forbids it; this makes a preamble that did not take visible.
+  const skillsLoaded = parsed.skillsLoaded ?? [];
+  if (skillsLoaded.length > 0) {
+    warnings.push({
+      class: "skills_loaded",
+      skills: skillsLoaded,
+      message: `skills_loaded: opencode spent turns loading interactive skills before the work (${skillsLoaded.join(", ")}). The plugin's prompts tell it not to, so a repository bootstrap file (AGENTS.md / CLAUDE.md) is probably overriding them.`
+    });
+  }
   for (const warning of warnings) {
     process.stderr.write(`warning: ${warning.message}\n`);
   }
@@ -331,6 +342,7 @@ async function executeJob({
     spawnError: outcome.spawnError,
     stderrTail: outcome.stderrTail,
     warnings,
+    skillsLoaded,
     timedOut: Boolean(outcome.timedOut),
     timeoutMs,
     durationMs: outcome.durationMs

@@ -148,6 +148,35 @@ if (args[0] === "run") {
     process.exit(0);
   }
 
+  // A delegate that obeys the repository bootstrap and loads an interactive
+  // skill before doing the work — the X1 shape, in both observed forms.
+  if (process.env.OPENCODE_FAKE_SKILL) {
+    const sessionID = "ses_fake0123456789";
+    const messageID = "msg_fake0123456789";
+    emit({
+      type: "tool",
+      ...base,
+      part: {
+        id: "prt_skill",
+        messageID,
+        sessionID,
+        tool: "skill",
+        state: { status: "completed", input: { name: process.env.OPENCODE_FAKE_SKILL } }
+      }
+    });
+    emit({
+      type: "tool",
+      ...base,
+      part: {
+        id: "prt_skillread",
+        messageID,
+        sessionID,
+        tool: "read",
+        state: { status: "completed", input: { filePath: "/Users/x/.config/opencode/skills/pua/SKILL.md" } }
+      }
+    });
+  }
+
   if (mode === "review-json") {
     const review = {
       verdict: "needs-attention",

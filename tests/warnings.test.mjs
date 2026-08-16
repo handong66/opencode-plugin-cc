@@ -42,6 +42,35 @@ test("an auto-rejected external path becomes a typed, actionable warning", () =>
   assert.equal(payload.warnings[0].path, "/private/tmp/claude-501/x/scratchpad/dossier.json");
 });
 
+// X1 (2): the prompt preamble tells headless delegates not to load interactive
+// skills, but a repository AGENTS.md/CLAUDE.md can still win. 89 of 231 recorded
+// opencode job logs opened by loading a skill instead of doing the work, which
+// is invisible in the answer and shows up only as turns and wall time.
+test("loading an interactive skill is counted and warned about", () => {
+  const fake = makeFakeEnv({
+    extra: {
+      OPENCODE_FAKE_TEXT: "the answer, eventually",
+      OPENCODE_FAKE_SKILL: "pua"
+    }
+  });
+  const cwd = makeTempGitRepo();
+
+  const result = runCompanion(["task", "--json", "--write", "do the work"], { env: fake.env, cwd });
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.deepEqual(payload.warnings.map((warning) => warning.class), ["skills_loaded"]);
+  assert.deepEqual(payload.warnings[0].skills, ["pua", "/Users/x/.config/opencode/skills/pua/SKILL.md"]);
+  assert.match(payload.warnings[0].message, /spent turns loading interactive skills/);
+  assert.match(result.stderr, /warning: skills_loaded/);
+
+  const clean = makeFakeEnv({ extra: { OPENCODE_FAKE_TEXT: "the answer" } });
+  const quiet = runCompanion(["task", "--json", "--write", "do the work"], {
+    env: clean.env,
+    cwd: makeTempGitRepo()
+  });
+  assert.deepEqual(JSON.parse(quiet.stdout).warnings, [], "a clean run must not warn");
+});
+
 test("detectPermissionWarnings dedupes and names the working directory", () => {
   const warnings = detectPermissionWarnings(`${REJECTION_LINE}\n${REJECTION_LINE}\n`, { cwd: "/repo" });
   assert.equal(warnings.length, 1);
