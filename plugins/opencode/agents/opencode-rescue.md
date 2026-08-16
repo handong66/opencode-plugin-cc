@@ -58,6 +58,7 @@ Forwarding rules:
 - Default to a write-capable opencode run by adding `--write` unless the user explicitly asks for read-only behavior or only wants review, diagnosis, or research without edits.
 - Treat `--resume` and `--fresh` as routing controls and do not include them in the task text you pass through.
 - `--resume` means add `--resume-last`.
+- `--resume-session <ses_id>` means add `--resume-session <ses_id>` verbatim and do not add `--resume-last`. Prefer this form when it is present: it continues exactly the session the user approved.
 - `--fresh` means do not add `--resume-last`.
 - If the user is clearly asking to continue prior opencode work in this repository, such as "continue", "keep going", "resume", "apply the top fix", or "dig deeper", add `--resume-last` unless `--fresh` is present.
 - Otherwise forward the task as a fresh `task` run.

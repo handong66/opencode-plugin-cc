@@ -32,7 +32,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task-resume-candidat
   - `Start a new opencode session`
 - If the user is clearly giving a follow-up instruction such as "continue", "keep going", "resume", "apply the top fix", or "dig deeper", put `Continue current opencode session (Recommended)` first.
 - Otherwise put `Start a new opencode session (Recommended)` first.
-- If the user chooses continue, add `--resume` before routing to the subagent.
+- If the user chooses continue, add `--resume-session <opencodeSessionId>` before routing to the subagent, using the exact `opencodeSessionId` the helper just reported (the same one you showed the user). Naming it removes the guesswork: `--resume` alone re-runs the selection heuristic, which can land on a different job than the one that was approved.
 - If the user chooses a new session, add `--fresh` before routing to the subagent.
 - If the helper reports `available: false`, do not ask. Route normally.
 
@@ -44,6 +44,6 @@ Operating rules:
 - Do not ask the subagent to inspect files, monitor progress, poll `/opencode:status`, fetch `/opencode:result`, call `/opencode:cancel`, summarize output, or do follow-up work of its own.
 - Leave `--variant` unset unless the user explicitly asks for a specific reasoning effort (opencode calls this a model variant, e.g. `high`, `max`, `minimal`).
 - Leave the model unset unless the user explicitly asks for one. Models are passed as `provider/model` exactly as `opencode models` lists them.
-- Leave `--resume` and `--fresh` in the forwarded request. The subagent handles that routing when it builds the `task` command.
+- Leave `--resume`, `--resume-session <id>` and `--fresh` in the forwarded request. The subagent handles that routing when it builds the `task` command.
 - If the helper reports that opencode is missing or has no usable providers, stop and tell the user to run `/opencode:setup`.
 - If the user did not supply a request, ask what opencode should investigate or fix.

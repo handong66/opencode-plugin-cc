@@ -58,7 +58,8 @@ Command selection:
 - If the forwarded request includes `--background` or `--wait`, treat that as Claude-side execution control only. Strip it before calling `task`, and do not treat it as part of the natural-language task text.
 - If the forwarded request includes `--model`, pass the `provider/model` value through to `task`.
 - If the forwarded request includes `--variant` (or the legacy `--effort`), pass it through to `task` (it maps to `opencode run --variant`).
-- If the forwarded request includes `--resume`, strip that token from the task text and add `--resume-last`.
+- If the forwarded request includes `--resume-session <ses_id>`, strip both tokens from the task text and pass `--resume-session <ses_id>` to `task` unchanged. This continues exactly that session; use it in preference to `--resume-last` whenever an id is given.
+- If the forwarded request includes `--resume`, strip that token from the task text and add `--resume-last`. `--resume-last` continues the newest resumable *task* session in this repository — completed, incomplete or failed, never a cancelled or orphaned one — and the companion prints which one it picked.
 - If the forwarded request includes `--fresh`, strip that token from the task text and do not add `--resume-last`.
 - `--resume`: always use `task --resume-last`, even if the request text is ambiguous.
 - `--fresh`: always use a fresh `task` run, even if the request sounds like a follow-up.

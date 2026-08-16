@@ -37,6 +37,7 @@ import {
   generateJobId,
   getConfig,
   listJobs,
+  pickResumeCandidate,
   readJobFile,
   resolveJobLogFile,
   resolveStateDir,
@@ -491,7 +492,7 @@ function exitCodeForOutputState(outputState) {
 
 async function commandTask(tokens) {
   const { flags, rest, errors, unknownFlags } = parseFlags(tokens, {
-    valueFlags: ["--model", "--variant", "--effort", "--timeout-ms", "--prompt-file"],
+    valueFlags: ["--model", "--variant", "--effort", "--timeout-ms", "--prompt-file", "--resume-session"],
     booleanFlags: [
       "--json",
       "--write",
@@ -523,6 +524,13 @@ async function commandTask(tokens) {
   const timeout = resolveTimeoutMs(flags, RUN_TIMEOUT_DEFAULT_MS);
   if (timeout.error) {
     print(timeout.error);
+    process.exitCode = 1;
+    return;
+  }
+  if (flags.has("--resume-last") && flags.get("--resume-session")) {
+    print(
+      "Pass either --resume-last (pick the newest resumable task) or --resume-session <ses_id> (continue a named session), not both."
+    );
     process.exitCode = 1;
     return;
   }
@@ -560,11 +568,21 @@ async function commandTask(tokens) {
   const readOnly = flags.has("--read-only") || !flags.has("--write");
   const variant = flags.get("--variant") ?? flags.get("--effort") ?? null;
 
-  let resumeSessionId = null;
+  let resumeSessionId = flags.get("--resume-session") ?? null;
+  let resumedFrom = resumeSessionId ? { jobId: null, opencodeSessionId: resumeSessionId } : null;
   if (flags.has("--resume-last")) {
-    const candidate = listJobs(cwd).find((job) => job.opencodeSessionId);
+    const candidate = pickResumeCandidate(listJobs(cwd), { sessionId: claudeSessionId() });
     if (candidate) {
       resumeSessionId = candidate.opencodeSessionId;
+      resumedFrom = { jobId: candidate.id, opencodeSessionId: candidate.opencodeSessionId };
+      // Which session was picked was previously invisible, so a heuristic that
+      // chose a different job from the one the user approved never showed up.
+      const line = `Resuming opencode session ${candidate.opencodeSessionId} (from job ${candidate.id}: ${candidate.promptPreview ?? candidate.summary ?? "no prompt recorded"})`;
+      if (asJson) {
+        process.stderr.write(`${line}\n`);
+      } else {
+        print(line);
+      }
     } else {
       print("No previous opencode session found for this repository; starting a fresh run.");
     }
@@ -602,6 +620,7 @@ async function commandTask(tokens) {
       evidenceLevel: payload.evidenceLevel,
       rawOutput: payload.rawOutput,
       opencodeSessionId: payload.opencodeSessionId,
+      resumedFrom,
       exitCode: payload.exitCode,
       timedOut: payload.timedOut,
       warnings: payload.warnings,
@@ -990,17 +1009,16 @@ function commandCancel(tokens) {
 function commandTaskResumeCandidate(tokens) {
   const { flags } = parseFlags(tokens, { booleanFlags: ["--json"] });
   const cwd = process.cwd();
-  const sessionId = claudeSessionId();
-  const candidates = listJobs(cwd).filter(
-    (job) => job.kind === "task" && job.status === "completed" && job.opencodeSessionId
-  );
-  const candidate = candidates.find((job) => sessionId && job.sessionId === sessionId) ?? candidates[0] ?? null;
+  // Same rule as `task --resume-last`, on purpose: this is the candidate the
+  // rescue command shows the user before asking them to approve a resume.
+  const candidate = pickResumeCandidate(listJobs(cwd), { sessionId: claudeSessionId() });
 
   const report = candidate
     ? {
         available: true,
         jobId: candidate.id,
         opencodeSessionId: candidate.opencodeSessionId,
+        status: candidate.status,
         endedAt: candidate.endedAt ?? candidate.updatedAt ?? null,
         promptPreview: candidate.promptPreview ?? null
       }
@@ -1011,7 +1029,7 @@ function commandTaskResumeCandidate(tokens) {
   } else {
     print(
       report.available
-        ? `Resumable opencode session: ${report.opencodeSessionId} (from job ${report.jobId}: ${report.promptPreview ?? ""})`
+        ? `Resumable opencode session: ${report.opencodeSessionId} (from job ${report.jobId}, ${report.status}: ${report.promptPreview ?? ""})`
         : "No resumable opencode session for this repository."
     );
   }
@@ -1122,7 +1140,10 @@ const SUBCOMMAND_HELP = {
     "  --variant <level>       reasoning variant; --effort is an alias",
     "  --write                 allow edits (default is read-only via the plan agent)",
     "  --read-only             force the read-only plan agent",
-    "  --resume-last           continue the most recent opencode session in this repo",
+    "  --resume-last           continue the newest resumable task session in this repo",
+    "                          (completed, incomplete or failed tasks; never a cancelled",
+    "                          or orphaned one — name those with --resume-session)",
+    "  --resume-session <id>   continue exactly this opencode session, no heuristic",
     "  --timeout-ms <ms>       companion-side deadline for the run (default 900000)",
     "  --                      everything after this is task text, never flags",
     ...EXECUTION_FLAG_NOTE,
@@ -1175,7 +1196,8 @@ const SUBCOMMAND_HELP = {
   "task-resume-candidate": [
     "usage: opencode-companion task-resume-candidate [--json]",
     "",
-    "Reports the opencode session /opencode:rescue --resume would continue."
+    "Reports the opencode session /opencode:rescue --resume would continue.",
+    "Same selection rule as `task --resume-last`, so what is shown is what runs."
   ],
   transfer: [
     "usage: opencode-companion transfer [flags]",
@@ -1204,7 +1226,7 @@ function commandHelp(subcommand = null) {
       "",
       "Subcommands (run `<subcommand> --help` for its flags):",
       "  setup [--json] [--enable-review-gate|--disable-review-gate]",
-      "  task [--json] [--model <provider/model>] [--variant <v>] [--write|--read-only] [--resume-last] [--timeout-ms <ms>] <task text>",
+      "  task [--json] [--model <provider/model>] [--variant <v>] [--write|--read-only] [--resume-last|--resume-session <id>] [--timeout-ms <ms>] <task text>",
       "  review [--base <ref>] [--scope auto|working-tree|branch] [--model <m>] [--variant <v>] [--timeout-ms <ms>] [--json]",
       "  adversarial-review [--base <ref>] [--scope ...] [--model <m>] [--timeout-ms <ms>] [focus text]",
       "  status [job-id] [--all] [--wait] [--timeout-ms <ms>] [--json]",

@@ -395,6 +395,30 @@ export function findJob(cwd, jobId, { reconcile = true } = {}) {
   return listJobs(cwd, { reconcile }).find((job) => job.id === jobId) ?? null;
 }
 
+// One rule for "which opencode session does --resume continue", shared by
+// `task --resume-last` and `task-resume-candidate`. They used to disagree:
+// `--resume-last` took the newest job of any kind and any status (a stale
+// `running` review could win) while the candidate query — the one the rescue
+// command shows the user before asking them to approve it — filtered to
+// completed tasks. The user approved one session and the run continued another.
+//
+// `incomplete` is deliberately eligible: resuming an unfinished run to ask for
+// the final answer is exactly the recovery P-COMPLETE recommends. `cancelled`
+// (the user stopped it on purpose) and `failed (orphaned)` (nothing is known
+// about how far it got) are not — name those with `--resume-session <id>`.
+const RESUMABLE_STATUSES = new Set(["completed", "incomplete", "failed"]);
+
+export function pickResumeCandidate(jobs, { sessionId = null, includeIncomplete = true } = {}) {
+  const candidates = jobs
+    .filter((job) => job.kind === "task" && job.opencodeSessionId)
+    .filter((job) => RESUMABLE_STATUSES.has(job.status))
+    .filter((job) => includeIncomplete || job.status !== "incomplete")
+    .filter((job) => !(job.status === "failed" && job.failureClass === "orphaned"))
+    .sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")));
+
+  return candidates.find((job) => sessionId && job.sessionId === sessionId) ?? candidates[0] ?? null;
+}
+
 export function setConfig(cwd, key, value) {
   return updateState(cwd, (state) => {
     state.config = {
