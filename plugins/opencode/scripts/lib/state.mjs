@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -156,15 +156,35 @@ function writeFileAtomic(filePath, contents) {
 // for a run whose payload is sitting on disk.
 //
 // So the whole read-modify-write is serialised on an `O_EXCL` lock file. It is
-// advisory and deliberately unable to wedge anything: a lock older than
-// LOCK_STALE_MS belongs to a dead holder and is broken, and a writer that still
-// cannot take it after LOCK_ACQUIRE_TIMEOUT_MS proceeds without it (degrading
-// to exactly the previous behaviour, re-merge included) rather than failing a
-// job write.
+// advisory and deliberately unable to wedge anything: an abandoned lock is
+// broken, and a writer that still cannot take it after LOCK_ACQUIRE_TIMEOUT_MS
+// proceeds without it (degrading to exactly the previous behaviour, re-merge
+// included) rather than failing a job write.
+//
+// "Abandoned" is decided by the holder, not by the clock. The lock records the
+// writer's pid and a token unique to that acquisition, so:
+//   - a lock whose pid is gone is broken immediately, whatever its mtime says.
+//     Age alone used to decide it, which cost the *next* writer the whole 5s
+//     window after a kill — and `task`/`review` upsert a job record before they
+//     spawn anything;
+//   - a lock whose pid is alive is never broken. Age alone used to decide that
+//     too, so a critical section starved past the window had its lock taken
+//     from under it, and its own `finally` then deleted the successor's lock:
+//     two writers back in the unguarded read-modify-write, silently;
+//   - a lock is only ever removed by the acquisition that owns it. Both the
+//     break path and the release path compare tokens first, so neither can
+//     delete a lock that has already been replaced.
+// LOCK_STALE_MS survives as the fallback for a lock this runtime cannot
+// attribute (one written by an older version, or an unreadable one).
 const LOCK_FILE_NAME = "state.lock";
 const LOCK_STALE_MS = 5_000;
-const LOCK_ACQUIRE_TIMEOUT_MS = 10_000;
+const LOCK_ACQUIRE_TIMEOUT_MS = positiveEnvInt("OPENCODE_COMPANION_LOCK_TIMEOUT_MS", 10_000);
 const LOCK_RETRY_MS = 4;
+
+function positiveEnvInt(name, fallback) {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw > 0 ? Math.round(raw) : fallback;
+}
 // Re-entrant within a process: `updateState` takes the lock and then calls
 // `saveState`, which takes it again.
 const lockDepth = new Map();
@@ -173,35 +193,96 @@ function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+// `null` for a lock that is not there any more; `{pid, token}` otherwise, with
+// `pid: null` when it cannot be attributed (an older version wrote a bare pid,
+// which still parses; anything else does not).
+function readLockRecord(lockFile) {
+  let raw;
+  try {
+    raw = fs.readFileSync(lockFile, "utf8");
+  } catch {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      return { pid: Number.isInteger(parsed.pid) ? parsed.pid : null, token: parsed.token ?? null };
+    }
+    if (Number.isInteger(parsed)) {
+      return { pid: parsed, token: null };
+    }
+  } catch {
+    // Not JSON at all.
+  }
+  return { pid: null, token: null };
+}
+
+// Not `isAlive` from process.mjs: that one treats every `kill` failure as
+// death, which is right for a child this companion spawned and wrong here. A
+// lock written by another user's process answers EPERM, and reading that as
+// "gone" would break a lock whose holder is very much alive.
+function holderIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return true; // Unattributable: assume alive, and let the clock decide.
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means the process exists and belongs to another user.
+    return error?.code === "EPERM";
+  }
+}
+
+// Removes the lock only if it is still the one that was judged. Two waiters can
+// reach the same verdict at the same instant, and the loser must not unlink a
+// lock its winner has already replaced — nor throw ENOENT out of `upsertJob`,
+// which used to surface as a stack trace and exit 1.
+function removeLockIfOwned(lockFile, owner) {
+  const current = readLockRecord(lockFile);
+  if (!current || current.token !== owner.token || current.pid !== owner.pid) {
+    return;
+  }
+  try {
+    fs.unlinkSync(lockFile);
+  } catch {
+    // Already gone: someone else broke the same lock first.
+  }
+}
+
 function acquireStateLock(lockFile) {
   const deadline = Date.now() + LOCK_ACQUIRE_TIMEOUT_MS;
+  const owner = { pid: process.pid, token: `${process.pid}-${Date.now()}-${randomUUID()}` };
   for (;;) {
     try {
-      fs.writeFileSync(lockFile, `${process.pid}\n`, { flag: "wx" });
-      return true;
+      fs.writeFileSync(lockFile, JSON.stringify(owner), { flag: "wx" });
+      return owner;
     } catch (error) {
       if (error.code !== "EEXIST") {
         // A store we cannot even create a lock file in (read-only mount, odd
         // permissions). Writing state.json may still work; do not block it.
-        return false;
+        return null;
       }
+    }
+    const record = readLockRecord(lockFile);
+    if (!record) {
+      continue; // Released between the two calls — retry immediately.
     }
     let ageMs = null;
     try {
       ageMs = Date.now() - fs.statSync(lockFile).mtimeMs;
     } catch {
-      ageMs = null; // released between the two calls — retry immediately.
+      continue;
     }
-    if (ageMs !== null && ageMs > LOCK_STALE_MS) {
-      removeFileIfExists(lockFile);
+    const abandoned = record.pid !== null ? !holderIsAlive(record.pid) : ageMs > LOCK_STALE_MS;
+    if (abandoned) {
+      removeLockIfOwned(lockFile, record);
       continue;
     }
     if (Date.now() >= deadline) {
-      return false;
+      return null;
     }
-    if (ageMs !== null) {
-      sleepSync(LOCK_RETRY_MS);
-    }
+    sleepSync(LOCK_RETRY_MS);
   }
 }
 
@@ -218,14 +299,16 @@ function withStateLock(cwd, run) {
     }
   }
 
-  const held = acquireStateLock(lockFile);
+  const owner = acquireStateLock(lockFile);
   lockDepth.set(lockFile, 1);
   try {
     return run();
   } finally {
     lockDepth.delete(lockFile);
-    if (held) {
-      removeFileIfExists(lockFile);
+    if (owner) {
+      // Ours only. `removeFileIfExists` deleted whatever was there, so a holder
+      // whose lock had been broken under it removed its successor's.
+      removeLockIfOwned(lockFile, owner);
     }
   }
 }

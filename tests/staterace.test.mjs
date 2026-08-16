@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { test } from "node:test";
 
 import { REPO_ROOT, makeTempDir } from "./helpers.mjs";
@@ -129,6 +129,74 @@ test("a stale lock file left by a dead writer is broken instead of blocking", ()
   const ids = listJobs(cwd, { reconcile: false }).map((job) => job.id).sort();
   assert.deepEqual(ids, ["after", "before"]);
   assert.equal(fs.existsSync(lockFile), false, "the lock is released after the write");
+});
+
+// The staleness window is a fallback, not the primary test: a lock whose writer
+// is *gone* is abandoned the moment we can see that, whatever its mtime says.
+// Waiting the window out was a real cost — `task`/`review` upsert a job record
+// before spawning, so a writer killed mid-write made the next run pay 5s before
+// it could even start.
+test("a lock whose writer is gone is broken at once, not waited out", () => {
+  const cwd = makeTempDir("opencode-staterace-deadpid");
+  upsertJob(cwd, { id: "before", kind: "task", status: "completed" });
+
+  // A pid that is definitively gone: a process that has already exited.
+  const corpse = spawnSync(process.execPath, ["-e", ""]);
+  assert.equal(corpse.status, 0, "the probe process must have run and exited");
+  const lockFile = path.join(resolveStateDir(cwd), "state.lock");
+  fs.writeFileSync(lockFile, JSON.stringify({ pid: corpse.pid, token: "abandoned" }));
+
+  // Fresh mtime: only the pid says this lock is dead.
+  const startedAt = Date.now();
+  upsertJob(cwd, { id: "after", kind: "task", status: "completed" });
+  const elapsed = Date.now() - startedAt;
+  assert.ok(elapsed < 2_000, `a dead writer's lock must not be waited out (took ${elapsed}ms)`);
+
+  const ids = listJobs(cwd, { reconcile: false }).map((job) => job.id).sort();
+  assert.deepEqual(ids, ["after", "before"]);
+  assert.equal(fs.existsSync(lockFile), false, "the lock is released after the write");
+});
+
+// The other direction, and the one that mattered: the holder was never checked
+// at all, so a critical section starved for longer than the window had its lock
+// broken under it — and its own `finally` then deleted the *successor's* lock,
+// putting two writers back into the unguarded read-modify-write with nothing to
+// show for it.
+test("a live writer's lock is never stolen, however old it looks", () => {
+  const cwd = makeTempDir("opencode-staterace-livelock");
+  upsertJob(cwd, { id: "before", kind: "task", status: "completed" });
+
+  const lockFile = path.join(resolveStateDir(cwd), "state.lock");
+  // This test process is alive by definition, and the lock looks ancient.
+  fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, token: "held-by-a-live-writer" }));
+  const ancient = new Date(Date.now() - 60_000);
+  fs.utimesSync(lockFile, ancient, ancient);
+
+  const writer = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `const { upsertJob } = await import(${JSON.stringify(STATE_MODULE)});
+       upsertJob(${JSON.stringify(cwd)}, { id: "after", kind: "task", status: "completed" });`
+    ],
+    {
+      encoding: "utf8",
+      // The waiter gives up quickly here; the point is what it does *not* do
+      // while waiting, not how long it is prepared to wait.
+      env: { ...process.env, OPENCODE_COMPANION_LOCK_TIMEOUT_MS: "250" }
+    }
+  );
+  assert.equal(writer.status, 0, writer.stderr);
+
+  // Degraded, not failed: the record is written even though the lock was never
+  // acquired. That has always been the contract.
+  const ids = listJobs(cwd, { reconcile: false }).map((job) => job.id).sort();
+  assert.deepEqual(ids, ["after", "before"]);
+
+  // And the live holder still owns its lock.
+  assert.equal(fs.existsSync(lockFile), true, "a live holder's lock must survive");
+  assert.equal(JSON.parse(fs.readFileSync(lockFile, "utf8")).token, "held-by-a-live-writer");
 });
 
 // A payload is read back by `result`, whose parse failure is equally silent.
