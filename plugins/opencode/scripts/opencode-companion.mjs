@@ -730,6 +730,15 @@ async function commandTask(tokens) {
       stopReason: payload.stopReason,
       toolEventCount: payload.toolEventCount,
       evidenceLevel: payload.evidenceLevel,
+      // The run's own report of which model answered, on the document the
+      // caller is actually reading. It was computed, stored and exposed through
+      // `status`/`result`, but not here — so a caller following the release note
+      // and branching on `modelCertainty === "actual"` read undefined.
+      model: payload.model,
+      modelSource: payload.modelSource,
+      modelCertainty: payload.modelCertainty,
+      agent: payload.agent,
+      variant: payload.variant,
       rawOutput: payload.rawOutput,
       opencodeSessionId: payload.opencodeSessionId,
       resumedFrom,
@@ -867,6 +876,9 @@ async function commandReview(tokens, { adversarial }) {
     if (asJson) {
       printJson({
         ok: true,
+        // No run happened, so every field a run would fill is null — the keys
+        // are still here so a consumer never has to shape-check the document.
+        jobId: null,
         outputState: "empty",
         outputStateReason: "nothing-to-review",
         isEmpty: true,
@@ -876,6 +888,11 @@ async function commandReview(tokens, { adversarial }) {
         stopReason: null,
         toolEventCount: 0,
         evidenceLevel: null,
+        model: null,
+        modelSource: null,
+        modelCertainty: null,
+        agent: null,
+        variant: null,
         warnings: [],
         review: null,
         rawOutput: ""
@@ -925,7 +942,7 @@ async function commandReview(tokens, { adversarial }) {
         }
       ]
     : [];
-  const { ok, outputState, payload } = await executeJob({
+  const { ok, jobId, outputState, payload } = await executeJob({
     kind,
     cwd,
     model,
@@ -950,6 +967,10 @@ async function commandReview(tokens, { adversarial }) {
   if (asJson) {
     printJson({
       ok,
+      // `task --json` has always carried the handle; a review's was only on the
+      // stderr handle line, so a caller that wanted to fetch the full payload
+      // later had to scrape it back out of narration.
+      jobId,
       outputState,
       outputStateReason: payload.outputStateReason,
       resultComplete: payload.resultComplete,
@@ -957,6 +978,13 @@ async function commandReview(tokens, { adversarial }) {
       stopReason: payload.stopReason,
       toolEventCount: payload.toolEventCount,
       evidenceLevel: payload.evidenceLevel,
+      // Which model reviewed the work is the first thing a caller weighing a
+      // verdict needs, and read-only reviews run on the `plan` agent's model.
+      model: payload.model,
+      modelSource: payload.modelSource,
+      modelCertainty: payload.modelCertainty,
+      agent: payload.agent,
+      variant: payload.variant,
       warnings: payload.warnings,
       review: payload.structuredOutput,
       rawOutput: payload.rawOutput

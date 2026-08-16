@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { test } from "node:test";
 
 import {
@@ -103,6 +104,60 @@ test("the job record and the rendered footer name the model, labelled as inferre
   const setup = JSON.parse(runCompanion(["setup", "--json"], { env: fake.env, cwd }).stdout);
   assert.equal(setup.defaultModel, "anthropic/claude-opus-4-1");
   assert.equal(setup.readOnlyModel, "deepseek/deepseek-v4-flash");
+});
+
+// X4: the README promises "`--json` carries `model`, `modelSource` and
+// `modelCertainty` for callers that need to branch on it". `status --json` did;
+// the documents `task --json` and `review --json` print did not, so a caller
+// following the release note read undefined and took the other branch.
+test("task --json and review --json carry the model fields the README promises", () => {
+  const home = makeOpencodeHome(CONFIG);
+  const fake = makeFakeEnv({ extra: { HOME: home } });
+  const cwd = makeTempGitRepo();
+
+  const task = JSON.parse(
+    runCompanion(["task", "--json", "--", "look at the diff"], { env: fake.env, cwd }).stdout
+  );
+  assert.equal(task.model, "deepseek/deepseek-v4-flash");
+  assert.equal(task.modelSource, "config:agent.plan.model");
+  assert.equal(task.modelCertainty, "expected", "nothing observed it, so it is a prediction");
+  assert.equal(task.agent, "plan");
+  assert.equal(task.variant, "max");
+
+  // An observation replaces the prediction here too, which is the branch the
+  // release note tells callers to take.
+  const observed = makeFakeEnv({ extra: { HOME: home, OPENCODE_FAKE_OBSERVED_MODEL: "openai/gpt-5-codex" } });
+  const observedTask = JSON.parse(
+    runCompanion(["task", "--json", "--", "again"], { env: observed.env, cwd }).stdout
+  );
+  assert.equal(observedTask.model, "openai/gpt-5-codex");
+  assert.equal(observedTask.modelSource, "event-stream");
+  assert.equal(observedTask.modelCertainty, "actual");
+
+  const reviewEnv = makeFakeEnv({ mode: "review-json", extra: { HOME: home } });
+  const review = JSON.parse(runCompanion(["review", "--json"], { env: reviewEnv.env, cwd }).stdout);
+  assert.equal(review.model, "deepseek/deepseek-v4-flash");
+  assert.equal(review.modelSource, "config:agent.plan.model");
+  assert.equal(review.modelCertainty, "expected");
+  assert.equal(review.agent, "plan", "read-only reviews run on the plan agent");
+  assert.equal(review.variant, "max");
+  // And the handle: `task --json` always carried it, `review --json` did not.
+  assert.match(review.jobId, /^review-/);
+  const stored = JSON.parse(
+    runCompanion(["status", review.jobId, "--json"], { env: reviewEnv.env, cwd }).stdout
+  ).job;
+  assert.equal(stored.id, review.jobId, "the id in the document must address the stored job");
+
+  // The empty-target document keeps the same key set, so a consumer never has
+  // to shape-check before reading.
+  execFileSync("git", ["add", "-A"], { cwd });
+  execFileSync("git", ["commit", "--quiet", "-m", "clean"], { cwd });
+  const empty = JSON.parse(runCompanion(["review", "--json"], { env: reviewEnv.env, cwd }).stdout);
+  assert.equal(empty.outputState, "empty");
+  for (const key of ["jobId", "model", "modelSource", "modelCertainty", "agent", "variant"]) {
+    assert.ok(key in empty, `${key} must be present on the empty document too`);
+    assert.equal(empty[key], null, `${key} must be null when no run happened`);
+  }
 });
 
 // PC5 asked for the model that actually ran. Deriving it from `~/.config` alone
