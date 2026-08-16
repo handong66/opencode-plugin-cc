@@ -60,7 +60,16 @@ export function describeRunSelection(job) {
   const qualifiers = [job.agent ? `agent ${job.agent}` : null, job.variant ? `variant ${job.variant}` : null]
     .filter(Boolean)
     .join(", ");
-  return `Model: ${job.model ?? "opencode default"}${qualifiers ? ` (${qualifiers})` : ""}`;
+  // Only two sources are observations: a `--model` this plugin put on the
+  // command line, and a model id the run's own event stream reported. Anything
+  // read out of a config file is a prediction — opencode resolves its model
+  // from a project-level config and its environment too, so stating an inferred
+  // id as fact would report a model that never ran.
+  const observed = job.modelCertainty
+    ? job.modelCertainty === "actual"
+    : job.modelSource === "flag" || job.modelSource === "event-stream";
+  const label = observed ? "Model" : "Model (expected)";
+  return `${label}: ${job.model ?? "opencode default"}${qualifiers ? ` (${qualifiers})` : ""}`;
 }
 
 function footer(job) {

@@ -213,36 +213,83 @@ export function parseJsonc(text) {
   return JSON.parse(withoutTrailingCommas);
 }
 
-export function readOpencodeModelConfig({ homeDir = os.homedir() } = {}) {
-  const candidates = [
-    path.join(homeDir, ".config", "opencode", "opencode.json"),
-    path.join(homeDir, ".config", "opencode", "opencode.jsonc")
-  ];
-  for (const file of candidates) {
-    let config;
-    try {
-      config = parseJsonc(fs.readFileSync(file, "utf8"));
-    } catch {
-      continue;
-    }
-    if (!config || typeof config !== "object") {
-      continue;
-    }
-    const agents = config.agent ?? config.agents ?? {};
-    return {
-      file,
-      model: typeof config.model === "string" ? config.model : null,
-      agentModels: {
-        plan: typeof agents.plan?.model === "string" ? agents.plan.model : null,
-        build: typeof agents.build?.model === "string" ? agents.build.model : null
-      },
-      agentVariants: {
-        plan: typeof agents.plan?.variant === "string" ? agents.plan.variant : null,
-        build: typeof agents.build?.variant === "string" ? agents.build.variant : null
-      }
-    };
+const CONFIG_BASENAMES = ["opencode.json", "opencode.jsonc"];
+
+function loadConfigFile(file) {
+  let config;
+  try {
+    config = parseJsonc(fs.readFileSync(file, "utf8"));
+  } catch {
+    return null;
   }
-  return { file: null, model: null, agentModels: { plan: null, build: null }, agentVariants: { plan: null, build: null } };
+  return config && typeof config === "object" ? { file, config } : null;
+}
+
+// opencode resolves its configuration from the global file *and* from the
+// project it is run in, with the project file winning. Reading only the global
+// one made the reported model wrong — silently and confidently — in exactly the
+// repositories that care enough to pin their own.
+function findProjectConfig(cwd) {
+  let dir = path.resolve(cwd);
+  for (;;) {
+    for (const base of CONFIG_BASENAMES) {
+      const loaded = loadConfigFile(path.join(dir, base)) ?? loadConfigFile(path.join(dir, ".opencode", base));
+      if (loaded) {
+        return loaded;
+      }
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) {
+      return null;
+    }
+    dir = parent;
+  }
+}
+
+export function readOpencodeModelConfig({ homeDir = os.homedir(), cwd = process.cwd() } = {}) {
+  // Lowest precedence first: a later layer overrides a key it also sets.
+  const layers = [];
+  for (const base of CONFIG_BASENAMES) {
+    const global = loadConfigFile(path.join(homeDir, ".config", "opencode", base));
+    if (global) {
+      layers.push(global);
+      break;
+    }
+  }
+  const project = cwd ? findProjectConfig(cwd) : null;
+  if (project && !layers.some((layer) => layer.file === project.file)) {
+    layers.push(project);
+  }
+
+  const resolved = {
+    file: null,
+    files: [],
+    projectFile: project?.file ?? null,
+    model: null,
+    modelFile: null,
+    agentModels: { plan: null, build: null },
+    agentModelFiles: { plan: null, build: null },
+    agentVariants: { plan: null, build: null }
+  };
+  for (const { file, config } of layers) {
+    resolved.files.push(file);
+    resolved.file = file;
+    const agents = config.agent ?? config.agents ?? {};
+    if (typeof config.model === "string") {
+      resolved.model = config.model;
+      resolved.modelFile = file;
+    }
+    for (const agent of ["plan", "build"]) {
+      if (typeof agents[agent]?.model === "string") {
+        resolved.agentModels[agent] = agents[agent].model;
+        resolved.agentModelFiles[agent] = file;
+      }
+      if (typeof agents[agent]?.variant === "string") {
+        resolved.agentVariants[agent] = agents[agent].variant;
+      }
+    }
+  }
+  return resolved;
 }
 
 // What this run will actually use, decided before it starts. Every recorded
@@ -250,8 +297,8 @@ export function readOpencodeModelConfig({ homeDir = os.homedir() } = {}) {
 // the fact that read-only runs land on whatever `agent.plan.model` says (a
 // flash-tier model in the observed config) was invisible to the person using
 // those reviews as an implementation gate.
-export function resolveRunSelection({ model = null, variant = null, readOnly = false, config = null } = {}) {
-  const resolved = config ?? readOpencodeModelConfig();
+export function resolveRunSelection({ model = null, variant = null, readOnly = false, config = null, cwd = process.cwd() } = {}) {
+  const resolved = config ?? readOpencodeModelConfig({ cwd });
   const agent = readOnly ? "plan" : "build";
   const agentModel = resolved.agentModels?.[agent] ?? null;
   const agentVariant = resolved.agentVariants?.[agent] ?? null;
@@ -265,10 +312,16 @@ export function resolveRunSelection({ model = null, variant = null, readOnly = f
   if (!model && agentModel && resolved.model && agentModel !== resolved.model) {
     warnings.push({
       class: "read_only_model_override",
-      message: `read_only_model_override: this run uses the \`${agent}\` agent, so its model is ${agentModel} (from ${resolved.file}), not your default ${resolved.model}. Pass --model explicitly if the agent's model is not the one you want reviewing your work.`
+      message: `read_only_model_override: this run uses the \`${agent}\` agent, so it is expected to run on ${agentModel} (from ${resolved.agentModelFiles?.[agent] ?? resolved.file}) rather than your default ${resolved.model}. Pass --model explicitly if the agent's model is not the one you want reviewing your work.`
     });
   }
-  return { model: effectiveModel, agent, variant: effectiveVariant, source, warnings };
+  // `--model` is the only value this plugin puts on opencode's command line;
+  // everything else here is a *prediction* of what opencode will resolve from
+  // its own config precedence. Reporting a prediction as the model that ran is
+  // the failure PC5 exists to prevent, so the certainty travels with the value
+  // and the renderer says "expected" until the run confirms it.
+  const certainty = model ? "actual" : "expected";
+  return { model: effectiveModel, agent, variant: effectiveVariant, source, certainty, warnings, configFiles: resolved.files ?? [] };
 }
 
 export function getOpencodeAvailability() {
@@ -390,6 +443,7 @@ export function parseEventStream(stdout) {
 
   let sessionId = null;
   let stopReason = null;
+  let observedModel = null;
   const textPartsByMessage = new Map();
   const messageOrder = [];
   // Headless delegates obey repository bootstrap files that tell every agent to
@@ -403,6 +457,16 @@ export function parseEventStream(stdout) {
 
   for (const event of events) {
     sessionId = event.sessionID ?? event.part?.sessionID ?? sessionId;
+    // What actually ran beats what the config predicted: opencode stamps the
+    // assistant message with the provider and model it used, and its own
+    // precedence (project config, environment) is not visible from here.
+    observedModel =
+      observedModel ??
+      describeEventModel(event.info) ??
+      describeEventModel(event.part) ??
+      describeEventModel(event.message) ??
+      describeEventModel(event.properties) ??
+      describeEventModel(event);
     const part = event.part;
     if (!part) {
       continue;
@@ -437,10 +501,32 @@ export function parseEventStream(stdout) {
     text,
     sessionId,
     stopReason,
+    observedModel,
     eventCount: events.length,
     toolEventCount: toolPartIds.size,
     skillsLoaded: [...skillsLoaded]
   };
+}
+
+// `{"providerID":"deepseek","modelID":"deepseek-v4-flash"}` is how the model
+// travels on an assistant message; some builds carry it as a single `model`
+// string instead. Anything else is left alone rather than guessed at.
+function describeEventModel(source) {
+  if (!source || typeof source !== "object") {
+    return null;
+  }
+  const provider =
+    typeof source.providerID === "string"
+      ? source.providerID
+      : typeof source.provider === "string"
+        ? source.provider
+        : null;
+  const model =
+    typeof source.modelID === "string" ? source.modelID : typeof source.model === "string" ? source.model : null;
+  if (!model) {
+    return null;
+  }
+  return provider && !model.includes("/") ? `${provider}/${model}` : model;
 }
 
 // Two observed shapes: an explicit skill tool call, and a plain read of a
@@ -697,6 +783,10 @@ export function runOpencode(
             text: stream.text,
             sessionId: stream.sessionId,
             stopReason: stream.stopReason,
+            // What the run said it used, when it said anything: the only report
+            // of the effective model that does not depend on re-deriving
+            // opencode's own config precedence.
+            observedModel: stream.observedModel ?? null,
             toolEventCount: stream.toolEventCount,
             skillsLoaded: stream.skillsLoaded ?? [],
             structuredOutput,

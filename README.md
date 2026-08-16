@@ -94,7 +94,9 @@ If opencode has no stored credentials yet, run:
 /opencode:transfer
 ```
 
-Every run prints its job id *before* opencode starts, so a detached run can be polled while it is still going, and every finished run prints the opencode session id, the model that actually ran, and `opencode -s <session-id>` to continue it inside opencode.
+Every run prints its job id *before* opencode starts, so a detached run can be polled while it is still going, and every finished run prints the opencode session id, the model behind the answer, and `opencode -s <session-id>` to continue it inside opencode.
+
+The model line distinguishes what was observed from what was predicted: `Model: <id>` when you passed `--model` or the run itself reported the model it used, and `Model (expected): <id>` when it was only read out of your opencode config (`~/.config/opencode/opencode.json[c]` plus any `opencode.json` in the repository, which overrides it). opencode resolves its own model, so an inferred id is a prediction and is labelled as one; `--json` carries `model`, `modelSource` and `modelCertainty` for callers that need to branch on it.
 
 Exit codes: `0` a real answer, `1` the run failed, `2` the run finished without producing one.
 
@@ -113,7 +115,7 @@ Three deliberate limits keep it from trapping you in a session you cannot leave:
 All commands go through one helper runtime, `plugins/opencode/scripts/opencode-companion.mjs`, which wraps headless `opencode run --format json`:
 
 - **Jobs**: every run is tracked in per-workspace state under this plugin's own data directory (`OPENCODE_COMPANION_DATA_DIR`, never the shared `CLAUDE_PLUGIN_DATA`), so status/result/cancel work across foreground, background and Claude sessions. Writes are serialised and atomic; a record whose process is gone is relabelled instead of counting up forever; session-end hooks terminate still-running jobs.
-- **Read-only vs write**: read-only runs (reviews, plain rescue diagnosis) use opencode's built-in `plan` agent, which cannot edit files. Write-capable runs (`task --write`, the rescue default) pass `--auto` so opencode can act without interactive permission prompts. Because the `plan` agent may carry its own model in your opencode config, every run reports the model it actually used.
+- **Read-only vs write**: read-only runs (reviews, plain rescue diagnosis) use opencode's built-in `plan` agent, which cannot edit files. Write-capable runs (`task --write`, the rescue default) pass `--auto` so opencode can act without interactive permission prompts. Because the `plan` agent may carry its own model in your opencode config, every run reports the model behind its answer — observed when the run or your `--model` says what it was, marked `(expected)` when it was inferred from config.
 - **Three outcomes, not two**: exiting 0 is not a verdict. A run that produces no final text, stops for a reason that is not a finished turn, or answers a review with something that is not a review, is reported as `incomplete` with its partial output labelled as partial — never as a completed answer.
 - **Structured reviews**: the review prompts embed a JSON schema contract, and the companion validates the model's final answer against it before rendering a verdict, falling back to the raw output rather than synthesising one from a malformed object.
 - **Transfer**: opencode cannot import Claude transcripts natively, so `transfer` distills the Claude session transcript into a handoff prompt and seeds a fresh opencode session with it.

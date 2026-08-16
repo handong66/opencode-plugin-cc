@@ -7,6 +7,8 @@
 //   OPENCODE_FAKE_TEXT       final answer text for success mode
 //   OPENCODE_FAKE_STDERR     written to stderr before the run still exits 0
 //   OPENCODE_FAKE_ARGS_FILE  when set, argv is dumped there as JSON
+//   OPENCODE_FAKE_OBSERVED_MODEL  provider/model reported on the assistant
+//                            message, the way a real run reports what ran
 //   OPENCODE_FAKE_ORPHAN_RACE when set, relabels this run's own job record as
 //                            failed/orphaned just before exiting, standing in
 //                            for a concurrent reader reconciling it in the
@@ -113,6 +115,19 @@ if (args[0] === "run") {
   const sessionID = "ses_fake0123456789";
   const messageID = "msg_fake0123456789";
   const base = { sessionID };
+
+  // opencode stamps the assistant message with the provider and model it chose.
+  // That is the only report of the model that actually answered — config files
+  // only say what it was expected to be.
+  if (process.env.OPENCODE_FAKE_OBSERVED_MODEL) {
+    const [providerID, ...rest] = process.env.OPENCODE_FAKE_OBSERVED_MODEL.split("/");
+    emit({
+      type: "message",
+      timestamp: Date.now(),
+      ...base,
+      info: { id: messageID, sessionID, role: "assistant", providerID, modelID: rest.join("/") }
+    });
+  }
 
   emit({ type: "step_start", timestamp: Date.now(), ...base, part: { id: "prt_step1", messageID, sessionID, type: "step-start" } });
 

@@ -362,7 +362,8 @@ async function executeJob({
   const selection = resolveRunSelection({
     model,
     variant,
-    readOnly: opencodeOptions.readOnly === true
+    readOnly: opencodeOptions.readOnly === true,
+    cwd
   });
 
   upsertJob(cwd, {
@@ -374,6 +375,9 @@ async function executeJob({
     model: selection.model,
     requestedModel: model,
     modelSource: selection.source,
+    // Before the run this is a prediction from opencode's config files, not an
+    // observation; the event stream upgrades it when it names the model.
+    modelCertainty: selection.certainty,
     agent: selection.agent,
     variant: selection.variant,
     promptPreview: firstLine(promptPreview, 160),
@@ -483,12 +487,18 @@ async function executeJob({
   for (const warning of warnings) {
     process.stderr.write(`warning: ${warning.message}\n`);
   }
+  // The run itself is the authority on which model answered. `resolveRunSelection`
+  // can only predict it from config files, and opencode's own precedence takes
+  // a project-level config and its environment into account as well — so a
+  // prediction is labelled as one until the stream confirms it.
+  const observedModel = parsed.observedModel ?? null;
   const payload = {
     kind,
-    model: selection.model,
+    model: observedModel ?? selection.model,
     agent: selection.agent,
     variant: selection.variant,
-    modelSource: selection.source,
+    modelSource: observedModel ? "event-stream" : selection.source,
+    modelCertainty: observedModel ? "actual" : selection.certainty,
     rawOutput: parsed.text ?? "",
     structuredOutput: parsed.structuredOutput ?? null,
     structuredOutputErrors: parsed.structuredOutputErrors ?? [],
@@ -534,6 +544,9 @@ async function executeJob({
     kind,
     status: wasCancelled ? "cancelled" : ok ? "completed" : incomplete ? "incomplete" : "failed",
     failureClass,
+    model: payload.model,
+    modelSource: payload.modelSource,
+    modelCertainty: payload.modelCertainty,
     outputState: classification.state,
     outputStateReason: classification.reason,
     // On the record as well as in the payload: a fan-in poller reading
@@ -956,8 +969,8 @@ function commandSetup(tokens) {
   const availability = getOpencodeAvailability();
   const gateEnabled = Boolean(getConfig(cwd).stopReviewGate);
   const modelConfig = availability.available
-    ? readOpencodeModelConfig()
-    : { model: null, agentModels: { plan: null, build: null } };
+    ? readOpencodeModelConfig({ cwd })
+    : { model: null, agentModels: { plan: null, build: null }, files: [] };
   const defaultModel = modelConfig.model;
   // The plugin's own read-only runs go through the `plan` agent, so this is the
   // model that will actually review the user's work — and it is a different one
@@ -975,6 +988,10 @@ function commandSetup(tokens) {
     defaultModel,
     readOnlyModel,
     readOnlyAgent: "plan",
+    // Which files those two were read from, in increasing precedence. opencode
+    // applies a project-level config over the global one, so naming the sources
+    // is the difference between a checkable claim and a guess.
+    modelConfigFiles: modelConfig.files ?? [],
     stopReviewGate: gateEnabled,
     nodeVersion: process.version,
     stateDir: resolveStateDir(cwd),
@@ -1007,7 +1024,7 @@ function commandSetup(tokens) {
   }
   if (availability.available && readOnlyModel && readOnlyModel !== defaultModel) {
     lines.push(
-      `Read-only runs (review, adversarial-review, and task without --write) use the plan agent, so they run on ${readOnlyModel}, not ${defaultModel ?? "the default"}.`
+      `Read-only runs (review, adversarial-review, and task without --write) use the plan agent, so they are expected to run on ${readOnlyModel}, not ${defaultModel ?? "the default"} (read from ${(modelConfig.files ?? []).join(", ") || "no config file"}; opencode has the final say).`
     );
   }
   lines.push(`Node: ${process.version}`);
