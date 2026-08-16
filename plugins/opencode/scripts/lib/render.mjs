@@ -72,7 +72,9 @@ const INCOMPLETE_REASON_DETAIL = {
   "empty-text": "opencode produced no final text at all.",
   "stop-reason": "The run stopped for a reason that is not a finished turn.",
   narration:
-    "The last message reads like narration about work in progress, not the requested answer (tool calls happened, but the final text is very short)."
+    "The last message reads like narration about work in progress, not the requested answer (tool calls happened, but the final text is very short).",
+  "schema-mismatch":
+    "The final answer did not match the review schema this run asked for, so there is no verdict to report — only the text below."
 };
 
 // The fourth renderer: a run that exited 0 without producing an answer. It must
@@ -80,21 +82,34 @@ const INCOMPLETE_REASON_DETAIL = {
 export function renderIncompleteOutput(job, payload) {
   const text = String(payload.rawOutput ?? "").trim();
   const toolCalls = Number(payload.toolEventCount ?? 0);
+  const schemaMismatch = payload.outputStateReason === "schema-mismatch";
   const lines = [
-    `opencode stopped before producing a final answer (stopReason: ${payload.stopReason ?? "unknown"}, ${toolCalls} tool call${toolCalls === 1 ? "" : "s"}, ${text.length} chars of text).`
+    schemaMismatch
+      ? `opencode answered, but the answer is not a review: it did not match the review output schema (${toolCalls} tool call${toolCalls === 1 ? "" : "s"}, ${text.length} chars of text).`
+      : `opencode stopped before producing a final answer (stopReason: ${payload.stopReason ?? "unknown"}, ${toolCalls} tool call${toolCalls === 1 ? "" : "s"}, ${text.length} chars of text).`
   ];
   const detail = INCOMPLETE_REASON_DETAIL[payload.outputStateReason];
   if (detail) {
     lines.push(detail);
   }
-  lines.push("Partial output below — treat it as work-in-progress, not as the answer.");
+  const schemaErrors = Array.isArray(payload.structuredOutputErrors) ? payload.structuredOutputErrors : [];
+  if (schemaMismatch && schemaErrors.length > 0) {
+    lines.push("", "Schema mismatches:", ...schemaErrors.slice(0, 8).map((error) => `- ${error}`));
+  }
+  lines.push(
+    schemaMismatch
+      ? "Raw output below — do not present it as a verdict, and do not infer one from it."
+      : "Partial output below — treat it as work-in-progress, not as the answer."
+  );
   lines.push("", text || "[opencode produced no text]");
   lines.push(...warningBlock(payload.warnings));
   lines.push(...stderrBlock(payload.stderrTail, 5));
 
   lines.push(
     "",
-    "Recover with: /opencode:rescue --resume Return only the final answer itself. Do not read any more files and do not call any tools."
+    schemaMismatch
+      ? "Recover with: /opencode:rescue --resume Return only the JSON review object required by the output schema. Do not read any more files and do not call any tools."
+      : "Recover with: /opencode:rescue --resume Return only the final answer itself. Do not read any more files and do not call any tools."
   );
   lines.push(footer(job));
   return lines.join("\n");

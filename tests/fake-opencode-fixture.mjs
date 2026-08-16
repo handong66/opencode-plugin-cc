@@ -199,6 +199,30 @@ if (args[0] === "run") {
   }
 
   if (mode === "review-json") {
+    // A model that answers with a JSON object that is not a review at all is
+    // the 补充发现 2 shape: `{"note":"I could not finish"}` used to render as a
+    // clean verdict with no findings.
+    if (process.env.OPENCODE_FAKE_REVIEW_JSON) {
+      emit({
+        type: "text",
+        timestamp: Date.now(),
+        ...base,
+        part: {
+          id: "prt_text1",
+          messageID,
+          sessionID,
+          type: "text",
+          text: "```json\n" + process.env.OPENCODE_FAKE_REVIEW_JSON + "\n```"
+        }
+      });
+      emit({
+        type: "step_finish",
+        timestamp: Date.now(),
+        ...base,
+        part: { id: "prt_finish1", reason: "stop", messageID, sessionID, type: "step-finish" }
+      });
+      process.exit(0);
+    }
     const review = {
       verdict: "needs-attention",
       summary: "Fake review summary.",

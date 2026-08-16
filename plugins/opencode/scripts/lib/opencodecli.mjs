@@ -62,6 +62,7 @@ export function classifyOutcome({
   toolEventCount = 0,
   promptChars = 0,
   hasStructuredOutput = false,
+  structuredOutputInvalid = false,
   minAnswerChars = null,
   env = process.env
 } = {}) {
@@ -84,6 +85,13 @@ export function classifyOutcome({
 
   if (text.length === 0) {
     return { ...base, state: "incomplete", reason: "empty-text" };
+  }
+
+  // The review-kind twin of the empty-answer case: the run talked, but what it
+  // produced is not the deliverable the schema asked for. Falling back to the
+  // raw output is right; calling it `completed` is not.
+  if (structuredOutputInvalid) {
+    return { ...base, state: "incomplete", reason: "schema-mismatch" };
   }
 
   if (stopReason) {
@@ -408,6 +416,73 @@ export function extractStructuredJson(text) {
   return null;
 }
 
+// Enough of JSON Schema to hold `schemas/review-output.schema.json` to its
+// word, with no dependency: type, required, enum, minLength, minimum/maximum,
+// properties and items. `additionalProperties` is deliberately not enforced —
+// an extra key is not a reason to throw away an otherwise well-formed review,
+// and the renderer only reads the keys it knows.
+export function validateAgainstSchema(value, schema, pointer = "") {
+  const errors = [];
+  const at = pointer || "(root)";
+  if (!schema || typeof schema !== "object") {
+    return errors;
+  }
+
+  const type = schema.type;
+  if (type === "object") {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      return [`${at}: expected an object`];
+    }
+    for (const key of schema.required ?? []) {
+      if (!(key in value) || value[key] === null || value[key] === undefined) {
+        errors.push(`${at}: missing required key "${key}"`);
+      }
+    }
+    for (const [key, subSchema] of Object.entries(schema.properties ?? {})) {
+      if (key in value && value[key] !== null && value[key] !== undefined) {
+        errors.push(...validateAgainstSchema(value[key], subSchema, pointer ? `${pointer}.${key}` : key));
+      }
+    }
+    return errors;
+  }
+
+  if (type === "array") {
+    if (!Array.isArray(value)) {
+      return [`${at}: expected an array`];
+    }
+    if (schema.items) {
+      value.forEach((item, index) => {
+        errors.push(...validateAgainstSchema(item, schema.items, `${pointer}[${index}]`));
+      });
+    }
+    return errors;
+  }
+
+  if (type === "string") {
+    if (typeof value !== "string") {
+      return [`${at}: expected a string`];
+    }
+    if (Number.isFinite(schema.minLength) && value.trim().length < schema.minLength) {
+      errors.push(`${at}: must not be empty`);
+    }
+  } else if (type === "integer" || type === "number") {
+    if (typeof value !== "number" || Number.isNaN(value) || (type === "integer" && !Number.isInteger(value))) {
+      return [`${at}: expected ${type === "integer" ? "an integer" : "a number"}`];
+    }
+    if (Number.isFinite(schema.minimum) && value < schema.minimum) {
+      errors.push(`${at}: must be >= ${schema.minimum}`);
+    }
+    if (Number.isFinite(schema.maximum) && value > schema.maximum) {
+      errors.push(`${at}: must be <= ${schema.maximum}`);
+    }
+  }
+
+  if (Array.isArray(schema.enum) && !schema.enum.includes(value)) {
+    errors.push(`${at}: must be one of ${schema.enum.map((option) => JSON.stringify(option)).join(", ")}`);
+  }
+  return errors;
+}
+
 function describeEventLine(line) {
   const trimmed = line.trim();
   if (!trimmed.startsWith("{")) {
@@ -528,6 +603,21 @@ export function runOpencode(
         // Bookkeeping only; the run's verdict does not depend on it.
       }
       const stream = parseEventStream(stdout);
+      // A parsed object is not a review. `extractStructuredJson` will happily
+      // return `{"note":"I could not finish"}` (or a JSON fragment lifted out
+      // of narration), and the renderer used to turn that into a verdict with
+      // an empty summary and no findings. Validate before believing it.
+      let structuredOutput = null;
+      let structuredOutputErrors = [];
+      if (stream && options.jsonSchema) {
+        const candidate = extractStructuredJson(stream.text);
+        if (candidate) {
+          structuredOutputErrors = validateAgainstSchema(candidate, options.jsonSchema);
+          structuredOutput = structuredOutputErrors.length === 0 ? candidate : null;
+        } else {
+          structuredOutputErrors = ["(root): the final answer contained no JSON object"];
+        }
+      }
       const parsed = stream
         ? {
             text: stream.text,
@@ -535,7 +625,9 @@ export function runOpencode(
             stopReason: stream.stopReason,
             toolEventCount: stream.toolEventCount,
             skillsLoaded: stream.skillsLoaded ?? [],
-            structuredOutput: options.jsonSchema ? extractStructuredJson(stream.text) : null
+            structuredOutput,
+            structuredOutputErrors,
+            expectedStructuredOutput: Boolean(options.jsonSchema)
           }
         : null;
       resolve({

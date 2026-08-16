@@ -349,7 +349,8 @@ async function executeJob({
     parsed: outcome.parsed,
     toolEventCount: parsed.toolEventCount ?? 0,
     promptChars: String(opencodeOptions.prompt ?? "").length,
-    hasStructuredOutput: Boolean(parsed.structuredOutput)
+    hasStructuredOutput: Boolean(parsed.structuredOutput),
+    structuredOutputInvalid: Boolean(parsed.expectedStructuredOutput) && !parsed.structuredOutput
   });
   const ok = classification.state === "completed";
   const incomplete = classification.state === "incomplete";
@@ -399,6 +400,7 @@ async function executeJob({
     kind,
     rawOutput: parsed.text ?? "",
     structuredOutput: parsed.structuredOutput ?? null,
+    structuredOutputErrors: parsed.structuredOutputErrors ?? [],
     stopReason: parsed.stopReason ?? null,
     outputState: classification.state,
     outputStateReason: classification.reason,
