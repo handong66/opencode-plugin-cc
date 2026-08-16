@@ -45,18 +45,33 @@ export function tokenize(input) {
 }
 
 // spec: { valueFlags: ["--model", ...], booleanFlags: ["--wait", ...] }
-// Returns { flags: Map<name, value|true>, rest: string[], errors: string[] }.
-// Unknown `--flags` are treated as part of the free text so natural-language
-// task text that happens to contain dashes is not swallowed.
+// Returns { flags, rest, errors, unknownFlags }.
+// Unknown `--flags` are still treated as part of the free text so
+// natural-language task text that happens to contain dashes is not swallowed —
+// but one that appears *before* any free text is reported in `unknownFlags`,
+// because in that position it is a mistyped flag, not prose. `--` ends flag
+// parsing entirely: everything after it is literal text.
 export function parseFlags(tokens, spec) {
   const valueFlags = new Set(spec.valueFlags ?? []);
   const booleanFlags = new Set(spec.booleanFlags ?? []);
   const flags = new Map();
   const rest = [];
   const errors = [];
+  const unknownFlags = [];
+  let sawFreeText = false;
+  let literal = false;
 
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
+
+    if (literal) {
+      rest.push(token);
+      continue;
+    }
+    if (token === "--") {
+      literal = true;
+      continue;
+    }
 
     if (valueFlags.has(token)) {
       const value = tokens[index + 1];
@@ -74,8 +89,15 @@ export function parseFlags(tokens, spec) {
       continue;
     }
 
+    if (!sawFreeText && token.startsWith("--") && token.length > 2) {
+      unknownFlags.push(token);
+      rest.push(token);
+      continue;
+    }
+
+    sawFreeText = true;
     rest.push(token);
   }
 
-  return { flags, rest, errors };
+  return { flags, rest, errors, unknownFlags };
 }

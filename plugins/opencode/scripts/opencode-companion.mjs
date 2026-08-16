@@ -240,7 +240,7 @@ function exitCodeForOutputState(outputState) {
 }
 
 async function commandTask(tokens) {
-  const { flags, rest, errors } = parseFlags(tokens, {
+  const { flags, rest, errors, unknownFlags } = parseFlags(tokens, {
     valueFlags: ["--model", "--variant", "--effort", "--timeout-ms"],
     booleanFlags: ["--json", "--write", "--read-only", "--resume-last", "--wait", "--background"]
   });
@@ -251,6 +251,15 @@ async function commandTask(tokens) {
     return;
   }
   if (rejectsBackgroundFlag(flags)) {
+    return;
+  }
+  // A `--flag` before any task text is a mistyped flag, not prose: running it
+  // as prompt text is how `--help` cost three real model turns.
+  if (unknownFlags.length > 0) {
+    print(
+      `Unknown flag: ${unknownFlags[0]}. Run 'task --help' for supported flags. (If this was meant as task text, quote it or put it after --.)`
+    );
+    process.exitCode = 1;
     return;
   }
   const timeout = resolveTimeoutMs(flags, RUN_TIMEOUT_DEFAULT_MS);
@@ -757,12 +766,102 @@ async function commandTransfer(tokens) {
   print(lines.join("\n"));
 }
 
-function commandHelp() {
+// Help is the only source of truth for what the runtime actually accepts, so it
+// is written per subcommand: `task --help` used to be sent to the model as the
+// prompt, which answered with a help page for the *opencode CLI* — flags that
+// this companion has never had.
+const EXECUTION_FLAG_NOTE = [
+  "  --background            rejected: it is a Claude Code execution flag. The companion",
+  "                          always runs in the foreground. Detach with",
+  "                          Bash(run_in_background: true), or use /opencode:rescue --background.",
+  "  --wait                  accepted no-op (foreground is already the behaviour)."
+];
+
+const SUBCOMMAND_HELP = {
+  task: [
+    "usage: opencode-companion task [flags] <task text>",
+    "       opencode-companion task [flags] -- <task text kept verbatim>",
+    "",
+    "  --json                  machine-readable result on stdout",
+    "  --model <provider/model>  override the model (leave unset to use opencode's default)",
+    "  --variant <level>       reasoning variant; --effort is an alias",
+    "  --write                 allow edits (default is read-only via the plan agent)",
+    "  --read-only             force the read-only plan agent",
+    "  --resume-last           continue the most recent opencode session in this repo",
+    "  --timeout-ms <ms>       companion-side deadline for the run (default 900000)",
+    "  --                      everything after this is task text, never flags",
+    ...EXECUTION_FLAG_NOTE,
+    "",
+    "Exit codes: 0 answer, 1 failed, 2 ran but produced no final answer."
+  ],
+  review: [
+    "usage: opencode-companion review [flags]",
+    "",
+    "  --base <ref>            review <ref>...HEAD instead of the working tree",
+    "  --scope auto|working-tree|branch",
+    "  --json                  machine-readable result on stdout",
+    "  --timeout-ms <ms>       companion-side deadline for the run (default 900000)",
+    ...EXECUTION_FLAG_NOTE
+  ],
+  "adversarial-review": [
+    "usage: opencode-companion adversarial-review [flags] [focus text]",
+    "",
+    "  --base <ref>            review <ref>...HEAD instead of the working tree",
+    "  --scope auto|working-tree|branch",
+    "  --json                  machine-readable result on stdout",
+    "  --timeout-ms <ms>       companion-side deadline for the run (default 900000)",
+    ...EXECUTION_FLAG_NOTE,
+    "",
+    "Any remaining text is passed to the reviewer as extra focus."
+  ],
+  status: [
+    "usage: opencode-companion status [job-id] [flags]",
+    "",
+    "  --all                   include jobs from other Claude sessions",
+    "  --wait                  block until the job reaches a terminal state",
+    "  --timeout-ms <ms>       bound for --wait (default 900000)",
+    "  --json                  machine-readable result on stdout"
+  ],
+  result: [
+    "usage: opencode-companion result [job-id] [flags]",
+    "",
+    "  --wait                  block until the job reaches a terminal state, then print it",
+    "  --timeout-ms <ms>       bound for --wait (default 900000)",
+    "  --json                  the stored payload as JSON — use this to feed scripts,",
+    "                          never head -c/tail -c on the rendered text"
+  ],
+  cancel: ["usage: opencode-companion cancel [job-id]", "", "With no id, cancels the newest running job in this repository."],
+  "task-resume-candidate": [
+    "usage: opencode-companion task-resume-candidate [--json]",
+    "",
+    "Reports the opencode session /opencode:rescue --resume would continue."
+  ],
+  transfer: [
+    "usage: opencode-companion transfer [flags]",
+    "",
+    "  --source <claude-jsonl> transcript to hand off (defaults to the current session)",
+    "  --model <provider/model>  override the model for the handoff turn"
+  ],
+  setup: [
+    "usage: opencode-companion setup [flags]",
+    "",
+    "  --json                  machine-readable readiness report",
+    "  --enable-review-gate    run a review at every Stop",
+    "  --disable-review-gate   turn that gate back off"
+  ]
+};
+
+function commandHelp(subcommand = null) {
+  const perCommand = SUBCOMMAND_HELP[subcommand];
+  if (perCommand) {
+    print([`opencode-companion ${subcommand}`, "", ...perCommand].join("\n"));
+    return;
+  }
   print(
     [
       "opencode-companion — helper runtime for the opencode Claude Code plugin",
       "",
-      "Subcommands:",
+      "Subcommands (run `<subcommand> --help` for its flags):",
       "  setup [--json] [--enable-review-gate|--disable-review-gate]",
       "  task [--json] [--model <provider/model>] [--variant <v>] [--write|--read-only] [--resume-last] [--timeout-ms <ms>] <task text>",
       "  review [--base <ref>] [--scope auto|working-tree|branch] [--timeout-ms <ms>] [--json]",
@@ -783,12 +882,36 @@ function commandHelp() {
   );
 }
 
+// `--help` only counts while no free text has started, so `task --help` is a
+// help request and `task explain the --help output` stays a task. `--` turns it
+// off entirely.
+function wantsHelp(tokens) {
+  for (const token of tokens) {
+    if (token === "--") {
+      return false;
+    }
+    if (token === "--help" || token === "-h") {
+      return true;
+    }
+    if (!token.startsWith("-")) {
+      return false;
+    }
+  }
+  return false;
+}
+
 async function main() {
   const [, , subcommand, ...restArgv] = process.argv;
   // Slash commands forward `$ARGUMENTS` as one string that needs tokenizing;
   // programmatic callers (like the stop gate) pass pre-split argv whose
   // elements — especially multi-line prompts — must stay verbatim.
   const tokens = restArgv.length > 1 ? restArgv : tokenize(restArgv[0] ?? "");
+
+  // Before dispatch: the switch below only sees argv[2], so `task --help` used
+  // to reach `commandTask` and be forwarded to the model as the prompt.
+  if (SUBCOMMAND_HELP[subcommand] && wantsHelp(tokens)) {
+    return commandHelp(subcommand);
+  }
 
   switch (subcommand) {
     case "setup":
