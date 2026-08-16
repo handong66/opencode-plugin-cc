@@ -146,13 +146,99 @@ function writeFileAtomic(filePath, contents) {
   }
 }
 
-// A lost update is still possible between the fresh read below and the rename:
-// another writer can swap its own version in during that window. Re-reading
-// afterwards and merging again converges without introducing a lock (locking,
-// backoff and stale-lock breaking are deliberately out of scope here).
+// The rename makes a *write* atomic; it does nothing for the read-modify-write
+// around it. Two companions calling `upsertJob` at the same instant both read
+// the same state.json, both merge their own job into it, and the second rename
+// wins — the first job's record is reverted to whatever the loser had read.
+// Measured before this lock existed: 8 concurrent writers left 3/8 records with
+// their final status (7/8 once the re-merge below was added). A dropped record
+// is not cosmetic — `findJob` cannot see it, so `result <id>` reports "no job"
+// for a run whose payload is sitting on disk.
+//
+// So the whole read-modify-write is serialised on an `O_EXCL` lock file. It is
+// advisory and deliberately unable to wedge anything: a lock older than
+// LOCK_STALE_MS belongs to a dead holder and is broken, and a writer that still
+// cannot take it after LOCK_ACQUIRE_TIMEOUT_MS proceeds without it (degrading
+// to exactly the previous behaviour, re-merge included) rather than failing a
+// job write.
+const LOCK_FILE_NAME = "state.lock";
+const LOCK_STALE_MS = 5_000;
+const LOCK_ACQUIRE_TIMEOUT_MS = 10_000;
+const LOCK_RETRY_MS = 4;
+// Re-entrant within a process: `updateState` takes the lock and then calls
+// `saveState`, which takes it again.
+const lockDepth = new Map();
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function acquireStateLock(lockFile) {
+  const deadline = Date.now() + LOCK_ACQUIRE_TIMEOUT_MS;
+  for (;;) {
+    try {
+      fs.writeFileSync(lockFile, `${process.pid}\n`, { flag: "wx" });
+      return true;
+    } catch (error) {
+      if (error.code !== "EEXIST") {
+        // A store we cannot even create a lock file in (read-only mount, odd
+        // permissions). Writing state.json may still work; do not block it.
+        return false;
+      }
+    }
+    let ageMs = null;
+    try {
+      ageMs = Date.now() - fs.statSync(lockFile).mtimeMs;
+    } catch {
+      ageMs = null; // released between the two calls — retry immediately.
+    }
+    if (ageMs !== null && ageMs > LOCK_STALE_MS) {
+      removeFileIfExists(lockFile);
+      continue;
+    }
+    if (Date.now() >= deadline) {
+      return false;
+    }
+    if (ageMs !== null) {
+      sleepSync(LOCK_RETRY_MS);
+    }
+  }
+}
+
+function withStateLock(cwd, run) {
+  ensureStateDir(cwd);
+  const lockFile = path.join(resolveStateDir(cwd), LOCK_FILE_NAME);
+  const depth = lockDepth.get(lockFile) ?? 0;
+  if (depth > 0) {
+    lockDepth.set(lockFile, depth + 1);
+    try {
+      return run();
+    } finally {
+      lockDepth.set(lockFile, depth);
+    }
+  }
+
+  const held = acquireStateLock(lockFile);
+  lockDepth.set(lockFile, 1);
+  try {
+    return run();
+  } finally {
+    lockDepth.delete(lockFile);
+    if (held) {
+      removeFileIfExists(lockFile);
+    }
+  }
+}
+
+// Kept as a second line of defence for the degraded path above (lock not
+// acquired) and for any writer from an older version of this plugin.
 const SAVE_MERGE_RETRIES = 3;
 
-export function saveState(cwd, state, { attempt = 0 } = {}) {
+export function saveState(cwd, state, options = {}) {
+  return withStateLock(cwd, () => saveStateLocked(cwd, state, options));
+}
+
+function saveStateLocked(cwd, state, { attempt = 0 } = {}) {
   const previousJobs = loadState(cwd).jobs;
   ensureStateDir(cwd);
   // Union the caller's (possibly stale) snapshot with what is on disk right
@@ -190,16 +276,21 @@ export function saveState(cwd, state, { attempt = 0 } = {}) {
   if (attempt < SAVE_MERGE_RETRIES) {
     const onDisk = new Set(loadState(cwd).jobs.map((job) => job.id));
     if (nextJobs.some((job) => !onDisk.has(job.id))) {
-      return saveState(cwd, nextState, { attempt: attempt + 1 });
+      return saveStateLocked(cwd, nextState, { attempt: attempt + 1 });
     }
   }
   return nextState;
 }
 
+// The read and the write are one critical section: the mutation is computed
+// from the state that was on disk when the lock was taken, so no concurrent
+// writer can slip a version in between them.
 export function updateState(cwd, mutate) {
-  const state = loadState(cwd);
-  mutate(state);
-  return saveState(cwd, state);
+  return withStateLock(cwd, () => {
+    const state = loadState(cwd);
+    mutate(state);
+    return saveStateLocked(cwd, state);
+  });
 }
 
 export function generateJobId(prefix = "job") {

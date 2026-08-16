@@ -41,16 +41,17 @@ test("state.json is replaced by rename, never truncated in place", () => {
   assert.deepEqual(leftovers, [], "the temp file must not survive the write");
 });
 
-// P-STATERACE 1 (regression guard): concurrency is the normal case here — one
-// `status --all` table routinely lists several in-flight jobs — and a writer
-// holding a stale snapshot used to unlink its neighbours' payload and log
-// files, while the write stream kept writing into the unlinked inode.
+// P-STATERACE 1: concurrency is the normal case here — one `status --all` table
+// routinely lists several in-flight jobs — and a writer holding a stale snapshot
+// used to unlink its neighbours' payload and log files while the write stream
+// kept writing into the unlinked inode.
 //
-// What is guaranteed without the (deliberately deferred) exclusive lock: no
-// writer ever deletes another writer's stored payload or log, and the store
-// always parses. A record can still be dropped from state.json by a simultaneous
-// read-modify-write; the lock item covers that.
-test("concurrent writers never destroy each other's payloads or logs", async () => {
+// The record half is the same race one level up: with the write atomic but the
+// surrounding read-modify-write unguarded, 3 of these 8 records kept their final
+// status (7 of 8 with the re-merge, still not all). A record that loses is
+// invisible to `findJob`, so `result <id>` denies a run whose payload is on
+// disk — hence the lock, and hence this asserting all N.
+test("concurrent writers never destroy each other's records, payloads or logs", async () => {
   const cwd = makeTempDir("opencode-staterace-concurrent");
   const writerCount = 8;
 
@@ -94,19 +95,40 @@ test("concurrent writers never destroy each other's payloads or logs", async () 
     );
   }
 
-  // The store itself must still be readable, and no record may carry a
-  // neighbour's fields. (A record can still be *stale* — reverted to the
-  // `running` snapshot a racing writer had merged from — until the deferred
-  // exclusive lock lands; that is a lost update, not a destroyed result, and
-  // the payload above is what `result <id>` prints.)
+  // Every record survives the concurrency with the status its own writer wrote
+  // last — no dropped id (the store would deny a job whose payload is right
+  // there) and no lost update back to the `running` snapshot a racing writer
+  // had merged from.
   const jobs = listJobs(cwd, { reconcile: false });
-  assert.ok(jobs.length > 0, "the store must not read as empty after concurrent writes");
-  for (const job of jobs) {
-    assert.ok(["running", "completed"].includes(job.status), `${job.id} has a plausible status`);
-    if (job.summary) {
-      assert.equal(job.summary, `answer ${job.id}`, "no record may carry another job's fields");
-    }
+  assert.equal(jobs.length, writerCount, "every writer's record must survive");
+  for (let index = 0; index < writerCount; index += 1) {
+    const job = jobs.find((candidate) => candidate.id === `job-${index}`);
+    assert.ok(job, `job-${index} is still in the store`);
+    assert.equal(job.status, "completed", `job-${index} kept its final status`);
+    assert.equal(job.summary, `answer job-${index}`, "no record may carry another job's fields");
   }
+});
+
+// The lock is advisory and must never become the reason a job cannot be
+// recorded: a lock file left behind by a killed writer is broken, not waited on
+// forever.
+test("a stale lock file left by a dead writer is broken instead of blocking", () => {
+  const cwd = makeTempDir("opencode-staterace-stalelock");
+  upsertJob(cwd, { id: "before", kind: "task", status: "completed" });
+
+  const lockFile = path.join(resolveStateDir(cwd), "state.lock");
+  fs.writeFileSync(lockFile, "999999\n");
+  // Older than the 5s staleness window, i.e. the holder is gone.
+  const ancient = new Date(Date.now() - 60_000);
+  fs.utimesSync(lockFile, ancient, ancient);
+
+  const startedAt = Date.now();
+  upsertJob(cwd, { id: "after", kind: "task", status: "completed" });
+  assert.ok(Date.now() - startedAt < 5_000, "a stale lock must not be waited out");
+
+  const ids = listJobs(cwd, { reconcile: false }).map((job) => job.id).sort();
+  assert.deepEqual(ids, ["after", "before"]);
+  assert.equal(fs.existsSync(lockFile), false, "the lock is released after the write");
 });
 
 // A payload is read back by `result`, whose parse failure is equally silent.
