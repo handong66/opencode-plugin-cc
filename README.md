@@ -67,6 +67,9 @@ If opencode has no stored credentials yet, run:
 /opencode:review
 
 # Review a commit range, or just part of one; trailing text steers the focus
+# `--base <ref>` (and `--base <ref> --head <ref>`) diff from the merge base, i.e.
+# `<base>...<head>` — the branch's own work, without changes it merely inherited.
+# Write `--base A..B` when you want the literal two-dot range instead.
 /opencode:review --base main
 /opencode:review --base 71dcdc5..HEAD --paths docs,src check the migration order
 

@@ -37,6 +37,7 @@ Argument handling:
 - The companion always runs in the foreground and now **rejects** `--background` with a non-zero exit, so forwarding it fails the run outright. Claude Code's `Bash(..., run_in_background: true)` is what actually detaches it.
 - Do not add extra review instructions or rewrite the user's intent.
 - Target selection: `--base <ref>` reviews `<ref>...HEAD`; `--base A..B` and `--base A...B` are accepted as written; `--head <ref>` moves the other end and therefore needs `--base` as well (on its own it is rejected, not quietly turned into a working-tree review); `--paths <glob,...>` (alias `--files`) limits the review to those pathspecs. Preserve whichever the user gave.
+- `--base X --head Y` diffs `X...Y` — from the merge base, so the review sees what `Y` added rather than everything `X` gained meanwhile. That is what a branch review wants; a caller who means the literal two-dot range writes `--base X..Y`.
 - Free text is now a focus instruction for the reviewer, not an error. Pass it through unchanged.
 - `--rubric-file <path>` supplies the user's own severity vocabulary (blocker/major/nit, P0/P1, …). The JSON output shape does not change; the reviewer maps their terms onto it.
 - `/opencode:review` still does not support staged-only or unstaged-only review; `--scope` accepts only `auto`, `working-tree` and `branch`, and anything else is rejected with the list.
