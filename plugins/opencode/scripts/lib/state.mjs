@@ -97,7 +97,28 @@ function removeFileIfExists(filePath) {
   }
 }
 
-export function saveState(cwd, state) {
+// Write to a sibling temp file and rename it into place. A reader then sees
+// either the old file or the new one but never a half-written one — and both
+// `loadState` and `readJobFile` swallow a parse failure, so a torn read shows
+// up as "no jobs" / "no stored output" rather than as an error.
+function writeFileAtomic(filePath, contents) {
+  const tmpFile = `${filePath}.${process.pid}-${Math.random().toString(36).slice(2, 8)}.tmp`;
+  try {
+    fs.writeFileSync(tmpFile, contents, "utf8");
+    fs.renameSync(tmpFile, filePath);
+  } catch (error) {
+    removeFileIfExists(tmpFile);
+    throw error;
+  }
+}
+
+// A lost update is still possible between the fresh read below and the rename:
+// another writer can swap its own version in during that window. Re-reading
+// afterwards and merging again converges without introducing a lock (locking,
+// backoff and stale-lock breaking are deliberately out of scope here).
+const SAVE_MERGE_RETRIES = 3;
+
+export function saveState(cwd, state, { attempt = 0 } = {}) {
   const previousJobs = loadState(cwd).jobs;
   ensureStateDir(cwd);
   // Union the caller's (possibly stale) snapshot with what is on disk right
@@ -129,7 +150,14 @@ export function saveState(cwd, state) {
     removeFileIfExists(job.logFile);
   }
 
-  fs.writeFileSync(resolveStateFile(cwd), `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
+  writeFileAtomic(resolveStateFile(cwd), `${JSON.stringify(nextState, null, 2)}\n`);
+
+  if (attempt < SAVE_MERGE_RETRIES) {
+    const onDisk = new Set(loadState(cwd).jobs.map((job) => job.id));
+    if (nextJobs.some((job) => !onDisk.has(job.id))) {
+      return saveState(cwd, nextState, { attempt: attempt + 1 });
+    }
+  }
   return nextState;
 }
 
@@ -257,7 +285,7 @@ export function getConfig(cwd) {
 export function writeJobFile(cwd, jobId, payload) {
   ensureStateDir(cwd);
   const jobFile = resolveJobFile(cwd, jobId);
-  fs.writeFileSync(jobFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  writeFileAtomic(jobFile, `${JSON.stringify(payload, null, 2)}\n`);
   return jobFile;
 }
 
