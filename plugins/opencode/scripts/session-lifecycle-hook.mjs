@@ -65,6 +65,8 @@ function handleSessionEnd(input) {
     upsertJob(workspaceRoot, {
       id: job.id,
       status: "cancelled",
+      // Terminal verdict: a stale `orphaned` label must not survive it.
+      failureClass: null,
       endedAt: new Date().toISOString(),
       summary: "cancelled at session end"
     });

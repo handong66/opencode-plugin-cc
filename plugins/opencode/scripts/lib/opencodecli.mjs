@@ -327,7 +327,7 @@ function describeEventLine(line) {
 
 // Runs one headless opencode turn. The child is detached into its own process
 // group so `cancel` and session teardown can terminate the whole tree.
-export function runOpencode(options, { cwd, logFile = null, onSpawn = null } = {}) {
+export function runOpencode(options, { cwd, logFile = null, onSpawn = null, onExit = null } = {}) {
   const args = buildOpencodeArgs(options);
   const startedAt = Date.now();
   const logStream = logFile ? fs.createWriteStream(logFile, { flags: "a" }) : null;
@@ -380,6 +380,14 @@ export function runOpencode(options, { cwd, logFile = null, onSpawn = null } = {
 
     child.on("close", (code) => {
       logStream?.end();
+      // Announced before parsing: from here on the pid is dead but the job
+      // record is still `running`, and parsing a large stream is not instant.
+      // A throwing hook must not strand the promise.
+      try {
+        onExit?.(code);
+      } catch {
+        // Bookkeeping only; the run's verdict does not depend on it.
+      }
       const stream = parseEventStream(stdout);
       const parsed = stream
         ? {

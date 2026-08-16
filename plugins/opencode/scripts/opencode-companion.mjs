@@ -13,6 +13,7 @@ import { classifyOutcome, getOpencodeAvailability, runOpencode } from "./lib/ope
 import { terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
+  describeJobStatus,
   fmtDuration,
   firstLine,
   renderIncompleteOutput,
@@ -105,7 +106,12 @@ async function executeJob({ kind, cwd, opencodeOptions, promptPreview, model = n
   const outcome = await runOpencode(opencodeOptions, {
     cwd,
     logFile,
-    onSpawn: (child) => upsertJob(cwd, { id: jobId, childPid: child.pid })
+    onSpawn: (child) => upsertJob(cwd, { id: jobId, childPid: child.pid }),
+    // Parsing a multi-hundred-KB event stream and rendering it takes real time,
+    // and for all of it the child pid is already dead while this record still
+    // says `running`. Dropping the pid here moves the record onto the grace
+    // window instead, so a concurrent reader cannot reconcile a live run.
+    onExit: () => upsertJob(cwd, { id: jobId, childPid: null })
   });
 
   const parsed = outcome.parsed ?? {};
@@ -148,6 +154,9 @@ async function executeJob({ kind, cwd, opencodeOptions, promptPreview, model = n
     id: jobId,
     kind,
     status: wasCancelled ? "cancelled" : ok ? "completed" : incomplete ? "incomplete" : "failed",
+    // A real verdict clears any label reconciliation wrote while this run was
+    // in flight; `upsertJob` merges, so omitting the key would keep it.
+    failureClass: null,
     outputState: classification.state,
     outputStateReason: classification.reason,
     stopReason: payload.stopReason,
@@ -530,8 +539,7 @@ function commandCancel(tokens) {
     return;
   }
   if (!["running", "queued"].includes(job.status)) {
-    const status = job.failureClass ? `${job.status} (${job.failureClass})` : job.status;
-    print(`Job ${job.id} is already ${status}; nothing to cancel.`);
+    print(`Job ${job.id} is already ${describeJobStatus(job)}; nothing to cancel.`);
     return;
   }
 
@@ -539,6 +547,8 @@ function commandCancel(tokens) {
   upsertJob(cwd, {
     id: job.id,
     status: "cancelled",
+    // Terminal verdict: drop any `orphaned` label a reader wrote in between.
+    failureClass: null,
     endedAt: new Date().toISOString(),
     summary: "cancelled by user"
   });

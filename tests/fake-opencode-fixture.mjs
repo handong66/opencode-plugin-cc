@@ -6,12 +6,41 @@
 //                            | empty-text | narration
 //   OPENCODE_FAKE_TEXT       final answer text for success mode
 //   OPENCODE_FAKE_ARGS_FILE  when set, argv is dumped there as JSON
+//   OPENCODE_FAKE_ORPHAN_RACE when set, relabels this run's own job record as
+//                            failed/orphaned just before exiting, standing in
+//                            for a concurrent reader reconciling it in the
+//                            window between the child exiting and the
+//                            companion writing its verdict
 
 import fs from "node:fs";
 import process from "node:process";
 
 const args = process.argv.slice(2);
 const mode = process.env.OPENCODE_FAKE_MODE ?? "success";
+
+// Any reader — `status --all`, the Stop hook, the caller's own `status --wait`
+// poll — reconciles a `running` record whose pid is gone. This reproduces that
+// write from inside the run, deterministically.
+async function simulateConcurrentReconcile() {
+  if (!process.env.OPENCODE_FAKE_ORPHAN_RACE) {
+    return;
+  }
+  const stateModule = new URL("../plugins/opencode/scripts/lib/state.mjs", import.meta.url);
+  const { listJobs, upsertJob } = await import(stateModule.href);
+  const cwd = process.cwd();
+  for (const job of listJobs(cwd, { reconcile: false })) {
+    if (job.status !== "running" && job.status !== "queued") {
+      continue;
+    }
+    upsertJob(cwd, {
+      id: job.id,
+      status: "failed",
+      failureClass: "orphaned",
+      endedAt: new Date().toISOString(),
+      summary: "process exited without writing a result (companion was killed or the machine restarted)"
+    });
+  }
+}
 
 function emit(event) {
   process.stdout.write(`${JSON.stringify(event)}\n`);
@@ -130,6 +159,7 @@ if (args[0] === "run") {
       cost: 0
     }
   });
+  await simulateConcurrentReconcile();
   process.exit(0);
 }
 

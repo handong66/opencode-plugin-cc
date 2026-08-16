@@ -17,6 +17,14 @@ export function firstLine(text, maxLength = 120) {
   return line.length > maxLength ? `${line.slice(0, maxLength - 1)}…` : line;
 }
 
+// `failureClass` qualifies a failure and nothing else. Reconciliation can label
+// a record `failed (orphaned)` from any reader, and the owning companion may
+// then write the real verdict on top of it; if the label ever outlived the
+// status it would make a successful run read as an orphan.
+export function describeJobStatus(job) {
+  return job?.status === "failed" && job?.failureClass ? `${job.status} (${job.failureClass})` : job?.status;
+}
+
 function footer(job) {
   const lines = ["", "---", `Job: ${job.id} (${job.kind}, ${job.status}, ${fmtDuration(job.durationMs)})`];
   if (job.opencodeSessionId) {
@@ -153,7 +161,7 @@ export function renderJobList(jobs, { gateEnabled = false } = {}) {
       job.status === "running" || job.status === "queued"
         ? fmtDuration(Date.now() - Date.parse(job.createdAt ?? "") || 0)
         : fmtDuration(job.durationMs);
-    const status = job.failureClass ? `${job.status} (${job.failureClass})` : job.status;
+    const status = describeJobStatus(job);
     lines.push(
       [job.id, job.kind, status, elapsed, firstLine(job.summary ?? job.promptPreview ?? "", 80)].join(" | ")
     );
@@ -166,7 +174,7 @@ export function renderJobDetail(job, payload, logTail) {
   const lines = [
     `Job: ${job.id}`,
     `Kind: ${job.kind}`,
-    `Status: ${job.failureClass ? `${job.status} (${job.failureClass})` : job.status}`,
+    `Status: ${describeJobStatus(job)}`,
     `Created: ${job.createdAt}`,
     `Updated: ${job.updatedAt}`,
     `Duration: ${fmtDuration(job.durationMs)}`
@@ -189,7 +197,7 @@ export function renderJobDetail(job, payload, logTail) {
   if (logTail) {
     lines.push("", "Recent activity:", "```", logTail, "```");
   }
-  if (job.failureClass === "orphaned") {
+  if (job.status === "failed" && job.failureClass === "orphaned") {
     lines.push(
       "",
       `The companion process for this job died before it could store a result.${job.logFile ? ` Partial output may exist in ${job.logFile}.` : ""}`,

@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  describeJobStatus,
   renderIncompleteOutput,
   renderJobDetail,
+  renderJobList,
   renderReviewOutput,
   renderTaskOutput,
   firstLine,
@@ -87,6 +89,28 @@ test("renderJobDetail surfaces the output state and stop reason", () => {
   assert.match(rendered, /Output state: incomplete/);
   assert.match(rendered, /Stop reason: tool-calls/);
   assert.match(rendered, /Run \/opencode:result review-x/);
+});
+
+// A reader can reconcile a job to `failed (orphaned)` while its companion is
+// still parsing the run; the owning process then writes the real verdict on
+// top. The label must never outlive the failure it describes.
+test("a failure label never qualifies a non-failed status", () => {
+  const stale = { ...job, id: "task-race", kind: "task", status: "completed", failureClass: "orphaned" };
+  assert.equal(describeJobStatus(stale), "completed");
+  assert.equal(describeJobStatus({ ...stale, status: "cancelled" }), "cancelled");
+  assert.equal(describeJobStatus({ ...stale, status: "failed" }), "failed (orphaned)");
+
+  const table = renderJobList([{ ...stale, createdAt: new Date().toISOString(), summary: "the real answer" }]);
+  assert.match(table, /task-race \| task \| completed \|/);
+  assert.doesNotMatch(table, /\(orphaned\)/);
+
+  const detail = renderJobDetail(stale, { outputState: "completed" }, "");
+  assert.match(detail, /Status: completed$/m);
+  assert.doesNotMatch(detail, /companion process for this job died/);
+
+  const failed = renderJobDetail({ ...stale, status: "failed" }, null, "");
+  assert.match(failed, /Status: failed \(orphaned\)/);
+  assert.match(failed, /companion process for this job died/);
 });
 
 test("format helpers behave", () => {

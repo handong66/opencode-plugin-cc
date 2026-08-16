@@ -195,6 +195,41 @@ test("status stops reporting a job as running once its process is gone", () => {
   assert.equal(jobs.filter((job) => job.status === "completed").length, 1);
 });
 
+// P-LIVENESS, second half: reconciliation runs from every reader, so a job can
+// be relabelled `failed (orphaned)` in the window between its child exiting and
+// its companion writing the verdict. The verdict must win, and no trace of the
+// label may survive on a run that succeeded.
+test("a reconcile that races the owning companion leaves no orphan label behind", () => {
+  const fake = makeFakeEnv({
+    extra: { OPENCODE_FAKE_TEXT: "the real answer", OPENCODE_FAKE_ORPHAN_RACE: "1" }
+  });
+  const cwd = makeTempGitRepo();
+
+  const result = runCompanion(["task", "--json", "--write", "answer the question"], { env: fake.env, cwd });
+  assert.equal(result.status, 0, `a successful run must still exit 0: ${result.stderr}`);
+  assert.equal(JSON.parse(result.stdout).rawOutput, "the real answer");
+
+  const jobs = JSON.parse(runCompanion(["status", "--json", "--all"], { env: fake.env, cwd }).stdout).jobs;
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0].status, "completed");
+  assert.equal(jobs[0].failureClass ?? null, null, "the terminal write must clear the reconcile label");
+  // The pid is dropped as the child exits, so the record spends the parse
+  // window on the grace clock rather than pointing at a dead process.
+  assert.equal(jobs[0].childPid ?? null, null);
+
+  const table = runCompanion(["status", "--all"], { env: fake.env, cwd }).stdout;
+  assert.match(table, /\| task \| completed \|/);
+  assert.doesNotMatch(table, /orphaned/);
+
+  const detail = runCompanion(["status", jobs[0].id], { env: fake.env, cwd }).stdout;
+  assert.match(detail, /Status: completed$/m);
+  assert.doesNotMatch(detail, /companion process for this job died/);
+
+  const stored = runCompanion(["result", jobs[0].id], { env: fake.env, cwd }).stdout;
+  assert.match(stored, /the real answer/);
+  assert.doesNotMatch(stored, /orphaned/);
+});
+
 test("silent runs (no events) are treated as failures", () => {
   const fake = makeFakeEnv({ mode: "silent" });
   const result = runCompanion(["task", "--json", "--write", "quiet"], { env: fake.env, cwd: makeTempGitRepo() });
