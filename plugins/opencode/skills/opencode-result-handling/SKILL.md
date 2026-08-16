@@ -26,10 +26,11 @@ Failure classes (`failureClass` on the job record and in `--json`; also rendered
 - `model_not_found` — unknown model id, usually provider-prefix casing. opencode's own `Did you mean:` hint is in the stderr tail.
 - `quota_exhausted` — provider balance or quota is gone. **Not** a plugin or prompt problem and **not** retryable; say so and let the user re-route to another provider rather than re-running.
 - `auth_required` — no usable credentials. Send the user to `/opencode:setup` and `!opencode auth login`; never improvise an alternate auth flow.
-- `provider_error` — server-side error. The only class worth one retry.
+- `rate_limited` — 429 / rate limit / provider overloaded. Transient, and the class most worth retrying: wait and re-run the same request unchanged rather than rewording it or switching model.
+- `provider_error` — server-side error. Worth one retry; if it repeats, switch provider.
 - `opencode_failed` — nothing recognisable. Report the stderr tail as-is.
 - `timeout` / `interrupted` / `orphaned` are the companion's own labels (deadline hit, companion killed, process gone), not provider verdicts.
-- A class is a reading aid derived from stderr text. It never changes whether the run passed or failed, so never present it as more certain than the stderr it came from.
+- A class is a reading aid derived from the run's **stderr** — never from opencode's own answer. It never changes whether the run passed or failed, so never present it as more certain than the stderr it came from.
 
 Evidence behind a review verdict:
 - `review` / `adversarial-review` report `evidenceLevel` (`none` | `thin` | `substantive`) next to the verdict and in `--json`. It is derived from how many tool calls the run made.

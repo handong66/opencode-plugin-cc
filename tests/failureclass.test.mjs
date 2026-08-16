@@ -25,9 +25,52 @@ test("classifyFailure names the recoverable classes and falls back safely", () =
   }
 
   // A run that did not fail has no failure class at all.
-  assert.equal(classifyFailure({ exitCode: 0, stderrTail: "403 not authorized" }), null);
+  assert.equal(classifyFailure({ exitCode: 0, stderrTail: "403 not authorized to use the model" }), null);
   // A spawn failure is about the binary, not the provider.
   assert.equal(classifyFailure({ exitCode: null, spawnError: "ENOENT", stderrTail: "" }), "opencode_failed");
+});
+
+// X3: three separate ways the classifier read a tail as something it was not.
+// The verdict never moved with it, but `failureClass` is a machine field on the
+// job record and in `--json`, and orchestrators branch on it.
+test("classifyFailure does not read HTTP codes or English out of context", () => {
+  const cases = [
+    // A bare 403 is what git says about a private remote. Sending the caller to
+    // "choose a model the provider actually grants" is a wrong instruction, and
+    // "retrying will not help" is a wrong claim.
+    [
+      "fatal: unable to access 'https://github.com/acme/private.git/': The requested URL returned error: 403",
+      "opencode_failed"
+    ],
+    // 429 is the one genuinely transient class, and it used to fall through to
+    // the bucket whose guidance says there is no recognised reason.
+    ["AI_APICallError: 429 Too Many Requests: rate limit exceeded", "rate_limited"],
+    ["Error: the upstream provider is overloaded, try again shortly", "rate_limited"],
+    // Billing beats throughput when a provider says both: waiting does not
+    // refill a balance.
+    ["429 You exceeded your current quota, please check your plan and billing details", "quota_exhausted"],
+    // Ordinary English in an error line is not opencode's model-id hint.
+    ["Aborted: Did you mean to run the tests first? No model id here.", "opencode_failed"],
+    // 403 with model context still classifies, in both orders.
+    ["provider refused: model anthropic/claude-opus-4-1 returned HTTP 403", "model_unauthorized"]
+  ];
+  for (const [stderrTail, expected] of cases) {
+    assert.equal(classifyFailure({ exitCode: 1, stderrTail }), expected, stderrTail);
+    assert.ok(FAILURE_CLASS_GUIDANCE[expected], `${expected} needs a next step`);
+  }
+});
+
+// The model's own answer is not evidence about the provider. It used to be half
+// the haystack, so a run that failed after writing about an HTTP code took the
+// class from its own prose.
+test("classifyFailure reads stderr only, never the model's own output", () => {
+  const rawOutput = "I checked the endpoint and it returns HTTP 403. Did you mean: src/app.mjs?";
+  assert.equal(classifyFailure({ exitCode: 1, stderrTail: "", rawOutput }), "opencode_failed");
+  assert.equal(
+    classifyFailure({ exitCode: 1, stderrTail: "402 payment required", rawOutput }),
+    "quota_exhausted",
+    "and the stderr class is unaffected by whatever the model said"
+  );
 });
 
 test("a quota failure is reported as unretryable instead of as raw stderr", () => {
@@ -67,6 +110,26 @@ test("a quota failure is reported as unretryable instead of as raw stderr", () =
     JSON.stringify(jobs.map((job) => [job.id, job.status, job.failureClass]))
   );
   assert.ok(jobs.every((job) => job.status === "failed"));
+});
+
+test("a rate-limited run is labelled retryable end to end", () => {
+  const fake = makeFakeEnv({
+    mode: "fail",
+    extra: { OPENCODE_FAKE_STDERR: "AI_APICallError: 429 Too Many Requests: rate limit exceeded" }
+  });
+  const cwd = makeTempGitRepo();
+
+  const result = runCompanion(["task", "--", "summarise the diff"], { env: fake.env, cwd });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /Next step \(rate_limited\)/);
+  assert.match(result.stdout, /wait and re-run the same request/i);
+  assert.match(result.stdout, /429 Too Many Requests/, "the raw tail is still printed unchanged");
+
+  const payload = JSON.parse(
+    runCompanion(["task", "--json", "--", "summarise the diff"], { env: fake.env, cwd }).stdout
+  );
+  assert.equal(payload.failureClass, "rate_limited");
+  assert.equal(payload.outputState, "failed", "a new class must not change the verdict");
 });
 
 test("an unauthorized model failure keeps the verdict and adds the next step", () => {

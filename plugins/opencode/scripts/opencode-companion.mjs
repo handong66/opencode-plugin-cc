@@ -532,11 +532,12 @@ async function executeJob({
       ? null
       : payload.timedOut
         ? "timeout"
-        : classifyFailure({
+        : // stderr only: the model's own answer is not evidence about the
+          // provider, and scanning it labelled runs from their own prose.
+          classifyFailure({
             exitCode: outcome.exitCode,
             spawnError: outcome.spawnError,
-            stderrTail: outcome.stderrTail,
-            rawOutput: payload.rawOutput
+            stderrTail: outcome.stderrTail
           });
   payload.failureClass = failureClass;
   const job = {

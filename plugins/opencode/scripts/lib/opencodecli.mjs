@@ -134,32 +134,54 @@ export const FAILURE_CLASS_GUIDANCE = {
   auth_required:
     "opencode has no usable credentials for this provider. Run `!opencode auth login`, then /opencode:setup to confirm before re-running.",
   provider_error:
-    "The provider returned a server-side error, which is the one class here worth retrying once. If it repeats, switch provider rather than rewording the prompt.",
+    "The provider returned a server-side error, which is worth retrying once. If it repeats, switch provider rather than rewording the prompt.",
+  rate_limited:
+    "The provider is rate-limiting or is overloaded. This one is transient: wait and re-run the same request unchanged — the model, the prompt and the plugin are not the problem. If it repeats immediately, the account's own rate ceiling is the limit, not this run.",
   opencode_failed:
     "opencode exited non-zero without a recognised reason. The stderr tail below is the only evidence; if it is empty, re-run with a narrower task or check `opencode run` by hand."
 };
 
-// Ordered because the tests are substring matches on a noisy tail: an HTTP code
-// is the strongest signal, so 403/402/401 are read before the prose forms.
+// Ordered, because a provider often states two things on one line: the class
+// that decides what the caller should *do* wins. Billing before throughput
+// (waiting does not refill a balance), and every HTTP code has to travel with
+// context — a bare 403 is what git says about a private remote.
 const FAILURE_CLASS_PATTERNS = [
-  ["model_unauthorized", /\b403\b|not authorized to access the requested model|unauthorized to (?:use|access) (?:the )?model/i],
-  ["quota_exhausted", /\b402\b|insufficient (?:credit|balance|funds|quota)|credit balance is too low|quota (?:exceeded|exhausted)|out of credits/i],
+  [
+    "model_unauthorized",
+    /\b403\b[^\n]{0,160}\bmodels?\b|\bmodels?\b[^\n]{0,160}\b403\b|not authori[sz]ed to access the requested model|unauthori[sz]ed to (?:use|access) (?:the )?model|(?:does not|doesn't|do not) have access to (?:the )?model/i
+  ],
+  [
+    "quota_exhausted",
+    /\b402\b|insufficient (?:credit|balance|funds|quota)|credit balance is too low|quota (?:exceeded|exhausted)|exceeded your (?:current |monthly |daily )?quota|out of credits|billing hard limit/i
+  ],
   ["auth_required", /\b401\b|no credentials|not authenticated|unauthenticated|authentication required|auth login/i],
-  ["model_not_found", /model not found|did you mean|unknown model|no such model id/i],
+  ["rate_limited", /\b429\b|rate[ _-]?limit|too many requests|overloaded|slow down/i],
+  // opencode's own hint names an id (`Did you mean: aihubmix/gpt-5?`). Bare
+  // "did you mean" is ordinary English — a model asking "Did you mean to run
+  // the tests first?" is not a missing-model error.
+  [
+    "model_not_found",
+    /model not found|unknown model|no such model id|did you mean:?\s*["'`]?[\w.-]+\/[\w.:-]+/i
+  ],
   ["provider_error", /unexpected server error|internal server error|\b5\d\d\s+(?:error|status)/i]
 ];
 
 // Classifies *why* a run failed, from the evidence a headless run leaves behind.
 // Returns null for a run that did not fail: the caller keeps `failureClass` free
 // for the companion's own labels (`timeout`, `interrupted`, `orphaned`).
-export function classifyFailure({ exitCode = null, spawnError = null, stderrTail = "", rawOutput = "" } = {}) {
+//
+// Only stderr is evidence. The model's own answer used to be part of the
+// haystack, so a run that failed *after* writing a sentence containing "HTTP
+// 403" or "did you mean …" was labelled from its own prose rather than from
+// what the provider said.
+export function classifyFailure({ exitCode = null, spawnError = null, stderrTail = "" } = {}) {
   if (!spawnError && exitCode === 0) {
     return null;
   }
   if (spawnError) {
     return "opencode_failed";
   }
-  const haystack = `${String(stderrTail ?? "")}\n${String(rawOutput ?? "")}`;
+  const haystack = String(stderrTail ?? "");
   for (const [failureClass, pattern] of FAILURE_CLASS_PATTERNS) {
     if (pattern.test(haystack)) {
       return failureClass;
