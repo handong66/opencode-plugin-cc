@@ -76,6 +76,25 @@ test("rescue docs teach the prompt forms that survive tokenization", () => {
   }
 });
 
+// X4/PC4: "return nothing" degraded exactly where it mattered — a forwarder
+// killed by the 120s Bash wall has no stdout to return, so 6 of 13 recorded
+// rescue dispatches came back empty while their job had already completed.
+test("rescue docs replace `return nothing` with a structured failure line", () => {
+  for (const [name, text] of [
+    ["skills/opencode-cli-runtime/SKILL.md", readDoc("skills", "opencode-cli-runtime", "SKILL.md")],
+    ["agents/opencode-rescue.md", readDoc("agents", "opencode-rescue.md")]
+  ]) {
+    assert.doesNotMatch(text, /return nothing/i, `${name} must not tell the forwarder to return nothing`);
+    assert.match(
+      text,
+      /OPENCODE_RESCUE_FAILED: <reason> \| job=<id[^>]*> \| log=<[^>]*>/,
+      `${name} must specify the structured failure line`
+    );
+    assert.match(text, /at most one `result <id>`/, `${name} must allow retrieving its own job`);
+    assert.match(text, /never write your own answer/i, `${name} must keep the substitution ban`);
+  }
+});
+
 // `--background` / `--wait` are Claude-side execution flags; forwarding them to
 // the companion is what made two 2026-07-21 runs die on the 2-minute wall.
 test("rescue docs keep --background as a Claude-side flag, not a companion flag", () => {

@@ -17,6 +17,7 @@ When the helper returns opencode output:
 - Preserve the opencode session ID and the `opencode -s <session-id>` command so the user can continue the session inside opencode.
 - For `opencode:opencode-rescue`, do not turn a failed or incomplete opencode run into a Claude-side implementation attempt. Report the failure and stop.
 - For `opencode:opencode-rescue`, if opencode was never successfully invoked, do not generate a substitute answer at all.
+- A single line of the form `OPENCODE_RESCUE_FAILED: <reason> | job=<id> | log=<path>` means the rescue subagent got no opencode answer. Report the reason and the job id to the user as-is; do not answer in opencode's place. If the id is real, `/opencode:status <id>` and `/opencode:result <id>` may still hold the run's output.
 - CRITICAL: After presenting review findings, STOP. Do not make any code changes. Do not fix any issues. You MUST explicitly ask the user which issues, if any, they want fixed before touching a single file. Auto-applying fixes from a review is strictly forbidden, even if the fix is obvious.
 - If the helper reports malformed output or a failed opencode run, include the most actionable stderr lines and stop there instead of guessing.
 

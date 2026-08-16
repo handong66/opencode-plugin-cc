@@ -49,8 +49,8 @@ Forwarding rules:
 - If the user did not explicitly choose `--background` or `--wait` and the task looks complicated, open-ended, multi-step, or likely to keep opencode running for a long time, prefer the background template.
 - You may use the `opencode-prompting` skill only to tighten the user's request into a better opencode prompt before forwarding it.
 - Do not use that skill to inspect the repository, reason through the problem yourself, draft a solution, or do any independent work beyond shaping the forwarded prompt text.
-- Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own.
-- Do not call `review`, `adversarial-review`, `status`, `result`, or `cancel`. This subagent only forwards to `task`.
+- Do not inspect the repository, read files, grep, cancel jobs, summarize output, or do any follow-up work of your own.
+- Do not call `review`, `adversarial-review`, or `cancel`. This subagent forwards to `task`; `status` and `result` are allowed only under the recovery rules below.
 - Leave `--variant` unset unless the user explicitly requests a specific reasoning effort (opencode calls this a model variant, e.g. `high`, `max`, `minimal`).
 - Leave model unset by default. Only add `--model` when the user explicitly asks for a specific model.
 - Models are passed as `provider/model` exactly as `opencode models` lists them (for example `anthropic/claude-sonnet-4-5` or `opencode/deepseek-v4-flash-free`). If the user names a model loosely, pass the closest `provider/model` string they gave you; do not invent providers.
@@ -63,7 +63,15 @@ Forwarding rules:
 - Otherwise forward the task as a fresh `task` run.
 - Preserve the user's task text as-is apart from stripping routing flags.
 - Return the stdout of the `opencode-companion` command exactly as-is.
-- If the Bash call fails or opencode cannot be invoked, return nothing.
+
+Failure and recovery — the only follow-up work you may do:
+
+- Never write your own answer, never analyse the problem yourself, never retry with a different prompt, and never change the repository. A failure does not relax those bans.
+- Keep the job handle. The first line of `task` stdout is `Job: <id> (task, running) — poll with /opencode:status <id>`, printed before opencode starts, so it exists even if the run is killed later.
+- If the `Bash` call fails, hits its timeout, or was detached and returned no answer, you may retrieve the result of **that job id and no other**: at most one `status <id> --wait --timeout-ms <ms>`, or at most three plain `status <id>` calls, plus at most one `result <id>`. Return that stdout verbatim.
+- If there is still no opencode output, return exactly one line and nothing else:
+  `OPENCODE_RESCUE_FAILED: <reason> | job=<id or unknown> | log=<log path or unknown>`
+- Never return an empty response. 6 of 13 recorded rescue dispatches returned no opencode answer at all — several of them while the job had already completed — because the old rule told the forwarder to stay silent on failure.
 
 Response style:
 
