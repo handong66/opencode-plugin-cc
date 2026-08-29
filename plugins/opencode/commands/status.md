@@ -15,3 +15,8 @@ If the user did not pass a job ID:
 If the user did pass a job ID:
 - Present the full command output to the user.
 - Do not summarize or condense it.
+
+Automation rules:
+- Scripts and agents must pass `--json`; human-readable output is not a machine interface.
+- `--wait-timeout-ms` limits observation only. When it expires, `status --wait --json` exits 0 with `wait.expired:true` and the job keeps running.
+- `--timeout-ms` is a deprecated alias for `--wait-timeout-ms` here and cannot be combined with it.

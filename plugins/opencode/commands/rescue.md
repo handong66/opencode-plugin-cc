@@ -13,10 +13,10 @@ $ARGUMENTS
 
 Execution mode:
 
-- If the request includes `--background`, run the `opencode:opencode-rescue` subagent in the background.
+- If the request includes `--background`, have the `opencode:opencode-rescue` subagent submit companion `task --background` and relay the returned `jobId`.
 - If the request includes `--wait`, run the `opencode:opencode-rescue` subagent in the foreground.
 - If neither flag is present, default to foreground.
-- `--background` and `--wait` are execution flags for Claude Code. Do not forward them to `task`, and do not treat them as part of the natural-language task text.
+- `--background` and `--wait` are companion execution controls. Forward exactly one of them to `task`, never both, and do not treat either as part of the natural-language task text.
 - `--model` and `--variant` are runtime-selection flags. Preserve them for the forwarded `task` call, but do not treat them as part of the natural-language task text.
 - If the request includes `--resume`, do not ask whether to continue. The user already chose.
 - If the request includes `--fresh`, do not ask whether to continue. The user already chose.

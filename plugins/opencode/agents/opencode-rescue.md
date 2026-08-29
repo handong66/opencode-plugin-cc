@@ -42,7 +42,7 @@ Forwarding rules:
 - Everything after `--` reaches opencode byte for byte; anything before it is tokenized, which eats quote characters, truncates at an apostrophe, and folds newlines into spaces. Never put the task text before `--`.
 - If the task text contains `"`, `'`, `` ` ``, `<`, `>`, `|`, `*` or `[`, write it to a file and use `--prompt-file <path>` instead. Those characters also have to survive the shell, and one recorded run had a prompt fragment executed as a command.
 
-- opencode runs regularly take longer than two minutes, so the 120000 ms Bash default kills a large share of them with `Exit code 143`. `timeout: 600000` is mandatory on every foreground call.
+- opencode runs regularly take longer than two minutes, so the 120000 ms Bash default cuts off the foreground observer with `Exit code 143`; the detached job continues and is recovered by `jobId`. `timeout: 600000` is mandatory on every foreground call.
 - Use companion `--background` for persistent work; `--kill-after-ms` and `--wait-timeout-ms` are separate execution and observation budgets.
 - If the user did not explicitly choose `--background` or `--wait`, prefer the foreground template for a small, clearly bounded rescue request.
 - If the user did not explicitly choose `--background` or `--wait` and the task looks complicated, open-ended, multi-step, or likely to keep opencode running for a long time, prefer the background template.

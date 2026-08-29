@@ -17,7 +17,7 @@ Core constraint:
 
 Execution mode rules:
 - If the raw arguments include `--wait`, do not ask. Run the review in the foreground.
-- If the raw arguments include `--background`, do not ask. Run the review in a Claude background task.
+- If the raw arguments include `--background`, do not ask. Submit the review to the companion's detached persistent worker and return its `jobId`.
 - Otherwise, estimate the review size before asking:
   - For working-tree review, start with `git status --short --untracked-files=all`.
   - For working-tree review, also inspect both `git diff --shortstat --cached` and `git diff --shortstat`.
@@ -38,6 +38,7 @@ Argument handling:
 - Target selection: `--base <ref>` reviews `<ref>...HEAD`; `--base A..B` and `--base A...B` are accepted as written; `--head <ref>` moves the other end and therefore needs `--base` as well (on its own it is rejected, not quietly turned into a working-tree review); `--paths <glob,...>` (alias `--files`) limits the review to those pathspecs. Preserve whichever the user gave.
 - `--base X --head Y` diffs `X...Y` — from the merge base, so the review sees what `Y` added rather than everything `X` gained meanwhile. That is what a branch review wants; a caller who means the literal two-dot range writes `--base X..Y`.
 - Free text is now a focus instruction for the reviewer, not an error. Pass it through unchanged.
+- The companion resolves the target and snapshots the prompt/diff before worker submission; later workspace changes do not alter this review.
 - `--rubric-file <path>` supplies the user's own severity vocabulary (blocker/major/nit, P0/P1, …). The JSON output shape does not change; the reviewer maps their terms onto it.
 - `/opencode:review` still does not support staged-only or unstaged-only review; `--scope` accepts only `auto`, `working-tree` and `branch`, and anything else is rejected with the list.
 - If the user wants the change challenged rather than checked, `/opencode:adversarial-review` is the stronger framing (and it takes `--threat-model`).
@@ -52,6 +53,7 @@ Bash({
   timeout: 600000
 })
 ```
+- If this Bash observer times out or is terminated, the detached worker keeps running. Recover with the `jobId` printed at startup via `status <id> --wait --wait-timeout-ms <ms> --json` or `result <id> --wait --wait-timeout-ms <ms> --json`.
 - Return the command stdout verbatim, exactly as-is.
 - Do not paraphrase, summarize, or add commentary before or after it.
 - Do not fix any issues mentioned in the review output.

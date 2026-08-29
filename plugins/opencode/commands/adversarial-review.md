@@ -21,7 +21,7 @@ Core constraint:
 
 Execution mode rules:
 - If the raw arguments include `--wait`, do not ask. Run in the foreground.
-- If the raw arguments include `--background`, do not ask. Run in a Claude background task.
+- If the raw arguments include `--background`, do not ask. Submit to the companion's detached persistent worker and return its `jobId`.
 - Otherwise, estimate the review size before asking:
   - For working-tree review, start with `git status --short --untracked-files=all`.
   - For working-tree review, also inspect both `git diff --shortstat --cached` and `git diff --shortstat`.
@@ -43,7 +43,8 @@ Argument handling:
 - It supports working-tree review, branch review, and `--base <ref>`; `--head <ref>` moves the other end of the range and needs `--base` alongside it. `--base X --head Y` diffs `X...Y` (from the merge base); write `--base X..Y` for the literal two-dot range.
 - `--threat-model "<boundary>"` is accepted here only. Plain `/opencode:review` rejects it, because only this prompt has a slot for it.
 - It does not support `--scope staged` or `--scope unstaged`.
-- Unlike `/opencode:review`, it can still take extra focus text after the flags.
+- Like `/opencode:review`, trailing free text is passed to the reviewer as extra focus.
+- The companion resolves the target and snapshots the prompt/diff before worker submission; later workspace changes do not alter this review.
 
 Foreground flow:
 - Run with a generous timeout (reviews can take several minutes):
@@ -54,6 +55,7 @@ Bash({
   timeout: 600000
 })
 ```
+- If this Bash observer times out or is terminated, the detached worker keeps running. Recover with the `jobId` printed at startup via `status <id> --wait --wait-timeout-ms <ms> --json` or `result <id> --wait --wait-timeout-ms <ms> --json`.
 - Return the command stdout verbatim, exactly as-is.
 - Do not paraphrase, summarize, or add commentary before or after it.
 - Do not fix any issues mentioned in the review output.

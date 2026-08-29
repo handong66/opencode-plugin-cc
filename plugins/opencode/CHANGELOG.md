@@ -4,6 +4,7 @@
 
 - Long tasks now run in detached workers backed by private, atomically claimed job inputs. Claude/Bash/companion exit and SessionEnd stop only the observer; `status`, `result`, and idempotent `cancel` recover by `jobId`.
 - `--kill-after-ms` is the provider hard budget and `--wait-timeout-ms` is the observer budget. `--background` is a real companion flag. The legacy `--timeout-ms` alias is deprecated for one minor release, warns on stderr and in JSON, and is rejected when mixed with its replacement.
+- README, command, rescue, setup and result-handling documentation now state the same schema-v2 lifecycle contract; documentation tests reject SessionEnd cancellation and Claude-Bash backgrounding claims.
 - Machine output is schema v2 with consistent job lifecycle, wait state, recovery commands, worker/child ownership and result-completeness fields.
 
 ## 0.2.0 — 2026-08-16

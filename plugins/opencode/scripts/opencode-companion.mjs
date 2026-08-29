@@ -1977,7 +1977,7 @@ const SUBCOMMAND_HELP = {
     "meant to be relayed verbatim. Slicing it by bytes breaks multi-byte",
     "characters and any embedded JSON — take --json or --structured-only instead."
   ],
-  cancel: ["usage: opencode-companion cancel [job-id]", "", "With no id, cancels the newest running job in this repository."],
+  cancel: ["usage: opencode-companion cancel [job-id] [--json]", "", "Idempotently cancels the named job; with no id, cancels the newest running job in this repository."],
   "task-resume-candidate": [
     "usage: opencode-companion task-resume-candidate [--json]",
     "",
@@ -2035,12 +2035,12 @@ function commandHelp(subcommand = null) {
       "  adversarial-review [--base <ref|A..B> [--head <ref>]] [--paths <globs>] [--threat-model <text>] [focus text]",
       "  status [job-id] [--all] [--wait] [--wait-timeout-ms <ms>] [--json]",
       "  result [job-id] [--wait] [--wait-timeout-ms <ms>] [--json|--structured-only]",
-      "  cancel [job-id]",
+      "  cancel [job-id] [--json]",
       "  task-resume-candidate [--json]",
       "  transfer [--source <claude-jsonl>] [--model <provider/model>]",
       "",
       "--kill-after-ms bounds provider execution; --wait-timeout-ms only bounds observation.",
-      "The deprecated --timeout-ms alias maps by context and is removed next minor.",
+      "The deprecated --timeout-ms alias maps by context and will be removed next minor.",
       "--background uses a detached worker; SessionEnd and caller timeouts do not cancel it."
     ].join("\n")
   );

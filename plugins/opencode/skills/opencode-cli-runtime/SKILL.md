@@ -42,7 +42,7 @@ Entry point rules:
 - `/opencode:setup --json` reports `pluginVersion` and `companionPath` if you need to confirm which copy answered.
 
 Timeout rules:
-- opencode runs regularly take longer than two minutes (typical 2-6 minutes for read-only reviews on the plan agent), so the Claude Code default of 120000 ms cuts a large share of them off mid-run with `Exit code 143`.
+- opencode runs regularly take longer than two minutes (typical 2-6 minutes for read-only reviews on the plan agent), so the Claude Code default of 120000 ms cuts off the foreground observer with `Exit code 143`. The detached job continues and is recovered by `jobId`.
 - Always pass `timeout: 600000` on a foreground `task` call. Never rely on the default.
 - Use the companion's `--background`; do not rely on Bash backgrounding. `--kill-after-ms` bounds provider execution and `--wait-timeout-ms` bounds observation only.
 

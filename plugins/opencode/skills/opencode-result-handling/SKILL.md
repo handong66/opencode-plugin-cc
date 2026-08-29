@@ -29,6 +29,7 @@ Failure classes (`failureClass` on the job record and in `--json`; also rendered
 - `rate_limited` — 429 / rate limit / provider overloaded. Transient, and the class most worth retrying: wait and re-run the same request unchanged rather than rewording it or switching model.
 - `provider_error` — server-side error. Worth one retry; if it repeats, switch provider.
 - `opencode_failed` — nothing recognisable. Report the stderr tail as-is.
+- `worker_start_failed` — the detached worker failed to start or claim its private job input.
 - `timeout` / `interrupted` / `orphaned` are the companion's own labels (deadline hit, companion killed, process gone), not provider verdicts.
 - A class is a reading aid derived from the run's **stderr** — never from opencode's own answer. It never changes whether the run passed or failed, so never present it as more certain than the stderr it came from.
 
@@ -61,6 +62,13 @@ Waiting on a job (which call to use, and what its fields mean):
 - `status --all --json` reports every job's `elapsedMs` and `resultComplete` in one call, so a barrier over several jobs does not need one call per job.
 - `resultComplete: false` on a finished job means "do not count this as an answer" (no final output, or a review with no evidence). Treat it as a missing seat, not as a vote.
 - How long to wait, and how to schedule around it, is not a contract fact and is not decided here: `status --help` and the plugin README carry the measured wall times to budget against.
+
+Schema-v2 machine contract:
+- Scripts, agents and stop gates use `--json`; human-readable output is not an automation interface. Stdout is one JSON document and deprecation notices also appear in `warnings[]` while stderr carries the notice.
+- A single-job document carries top-level `schemaVersion: 2`, `jobId`, `job`, `wait`, `warnings[]`, and `nextAction`. `job` includes `provider`, `kind`, `status`, `terminal`, `resultComplete`, `workerPid`, `childPid`, `killAfterMs`, and `deadlineAt` when known.
+- `status --wait` observation expiry exits 0 with `wait.expired:true`. `result --wait` observation expiry exits 1 with the same field. Neither cancels the job.
+- `cancel <id> --json` is idempotent: the first cancellation and repeats exit 0, repeats report `changed:false`, and an existing terminal result is never rewritten. Unknown ids exit 1.
+- Legacy `--timeout-ms` maps to `--kill-after-ms` for task/review submission and `--wait-timeout-ms` for waiting status/result calls. It is rejected alongside its replacement and will be removed in the next minor release.
 
 Incomplete runs (`outputState: incomplete`, job status `incomplete`, exit code 2):
 - The helper prints `opencode stopped before producing a final answer (...)` when opencode exited cleanly without an answer: no text at all, a stop reason that is not a finished turn (for example `tool-calls`), or one line of narration after a batch of tool calls.
