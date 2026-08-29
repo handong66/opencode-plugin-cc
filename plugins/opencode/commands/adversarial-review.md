@@ -36,9 +36,8 @@ Execution mode rules:
   - `Run in background`
 
 Argument handling:
-- Preserve the user's arguments exactly, except for the two execution flags.
-- `--wait` and `--background` are Claude Code execution flags. Use them to pick the flow above, then remove them from the string you pass to the companion; call what is left `COMPANION_ARGS`.
-- The companion always runs in the foreground and now **rejects** `--background` with a non-zero exit, so forwarding it fails the run outright. Claude Code's `Bash(..., run_in_background: true)` is what actually detaches it.
+- Preserve the user's arguments exactly and forward `--wait` or `--background` to the companion. They are mutually exclusive.
+- `--kill-after-ms` is the hard provider budget; `--wait-timeout-ms` is only the foreground observer budget.
 - Do not weaken the adversarial framing or rewrite the user's focus text.
 - `/opencode:adversarial-review` uses the same review target selection as `/opencode:review`.
 - It supports working-tree review, branch review, and `--base <ref>`; `--head <ref>` moves the other end of the range and needs `--base` alongside it. `--base X --head Y` diffs `X...Y` (from the merge base); write `--base X..Y` for the literal two-dot range.
@@ -60,13 +59,13 @@ Bash({
 - Do not fix any issues mentioned in the review output.
 
 Background flow:
-- Launch the review with `Bash` in the background:
+- Submit the review to the companion's persistent worker:
 ```typescript
 Bash({
-  command: `node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" adversarial-review "COMPANION_ARGS"`,
+  command: `node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" adversarial-review --background "COMPANION_ARGS"`,
   description: "opencode adversarial review",
-  run_in_background: true
+  timeout: 10000
 })
 ```
-- Do not call `BashOutput` or wait for completion in this turn.
+- Capture and relay the returned `jobId`; do not wait for completion in this turn.
 - After launching the command, tell the user: "opencode adversarial review started in the background. Check `/opencode:status` for progress."

@@ -34,8 +34,7 @@ Forwarding rules:
 
   ```
   Bash({
-    command: 'node "${OPENCODE_COMPANION_BIN:-${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs}" task --write --prompt-file /path/to/prompt.md',
-    run_in_background: true,
+    command: 'node "${OPENCODE_COMPANION_BIN:-${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs}" task --write --background --prompt-file /path/to/prompt.md',
     description: "Delegate the rescue request to opencode in the background"
   })
   ```
@@ -44,7 +43,7 @@ Forwarding rules:
 - If the task text contains `"`, `'`, `` ` ``, `<`, `>`, `|`, `*` or `[`, write it to a file and use `--prompt-file <path>` instead. Those characters also have to survive the shell, and one recorded run had a prompt fragment executed as a command.
 
 - opencode runs regularly take longer than two minutes, so the 120000 ms Bash default kills a large share of them with `Exit code 143`. `timeout: 600000` is mandatory on every foreground call.
-- `timeout` and `run_in_background` are `Bash` parameters, not companion flags; never put them on the companion command line.
+- Use companion `--background` for persistent work; `--kill-after-ms` and `--wait-timeout-ms` are separate execution and observation budgets.
 - If the user did not explicitly choose `--background` or `--wait`, prefer the foreground template for a small, clearly bounded rescue request.
 - If the user did not explicitly choose `--background` or `--wait` and the task looks complicated, open-ended, multi-step, or likely to keep opencode running for a long time, prefer the background template.
 - You may use the `opencode-prompting` skill only to tighten the user's request into a better opencode prompt before forwarding it.
@@ -69,7 +68,7 @@ Failure and recovery — the only follow-up work you may do:
 
 - Never write your own answer, never analyse the problem yourself, never retry with a different prompt, and never change the repository. A failure does not relax those bans.
 - Keep the job handle. The first line of `task` stdout is `Job: <id> (task, running) — poll with /opencode:status <id>`, printed before opencode starts, so it exists even if the run is killed later.
-- If the `Bash` call fails, hits its timeout, or was detached and returned no answer, you may retrieve the result of **that job id and no other**: at most one `status <id> --wait --timeout-ms <ms>`, or at most three plain `status <id>` calls, plus at most one `result <id>`. Return that stdout verbatim.
+- If observation expires, retrieve **that job id and no other** with at most one `status <id> --wait --wait-timeout-ms <ms>` and one `result <id> --wait --wait-timeout-ms <ms>`. Return stdout verbatim.
 - If there is still no opencode output, return exactly one line and nothing else:
   `OPENCODE_RESCUE_FAILED: <reason> | job=<id or unknown> | log=<log path or unknown>`
 - Never return an empty response. 6 of 13 recorded rescue dispatches returned no opencode answer at all — several of them while the job had already completed — because the old rule told the forwarder to stay silent on failure.

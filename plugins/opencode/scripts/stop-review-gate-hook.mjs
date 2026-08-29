@@ -3,6 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -19,6 +20,7 @@ import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 // became available and the caller got nothing at all.
 const STOP_HOOK_BUDGET_MS = 900 * 1000;
 const STOP_REVIEW_TIMEOUT_MS = Math.round(STOP_HOOK_BUDGET_MS * 0.8);
+const STOP_REVIEW_KILL_AFTER_MS = STOP_REVIEW_TIMEOUT_MS - 30_000;
 // Two blocks in a row means the session cannot get past this gate on its own.
 // A third would be a loop with the user inside it.
 const MAX_CONSECUTIVE_BLOCKS = 2;
@@ -44,15 +46,18 @@ function logNote(message) {
   process.stderr.write(`${message}\n`);
 }
 
-function buildStopReviewPrompt(input = {}) {
+function buildStopReviewPrompt(input = {}, snapshot = null) {
   const lastAssistantMessage = String(input.last_assistant_message ?? "").trim();
   const template = loadPromptTemplate(ROOT_DIR, "stop-review-gate");
   const claudeResponseBlock = lastAssistantMessage
     ? ["Previous Claude response:", lastAssistantMessage].join("\n")
     : "";
-  return interpolateTemplate(template, {
+  const base = interpolateTemplate(template, {
     CLAUDE_RESPONSE_BLOCK: claudeResponseBlock
   });
+  return snapshot?.input
+    ? `${base}\n\nReview only this submission-time snapshot (diff hash ${snapshot.diffHash}); later workspace changes are out of scope:\n\n${snapshot.input}`
+    : base;
 }
 
 // Three verdicts, not two. A gate whose failure mode is "the user cannot end
@@ -80,9 +85,9 @@ function parseStopReviewOutput(rawOutput) {
   return { verdict: "error", reason: "the review task answered in an unrecognised format" };
 }
 
-function runStopReview(cwd, input = {}, { availabilityChecked = false } = {}) {
+function runStopReview(cwd, input = {}, { availabilityChecked = false, snapshot = null } = {}) {
   const scriptPath = path.join(SCRIPT_DIR, "opencode-companion.mjs");
-  const prompt = buildStopReviewPrompt(input);
+  const prompt = buildStopReviewPrompt(input, snapshot);
   const childEnv = {
     ...process.env,
     ...(input.session_id ? { [SESSION_ID_ENV]: input.session_id } : {}),
@@ -94,8 +99,10 @@ function runStopReview(cwd, input = {}, { availabilityChecked = false } = {}) {
     // The hook has already paid for `opencode --version` + `opencode auth list`
     // (~1.1s measured); the child would otherwise run the same two probes.
     ...(availabilityChecked ? { [READY_ENV]: "1" } : {})
+    ,OPENCODE_COMPANION_JOB_ORIGIN: "stop-gate",
+    OPENCODE_COMPANION_DIFF_HASH: snapshot?.diffHash ?? ""
   };
-  const result = spawnSync(process.execPath, [scriptPath, "task", "--json", prompt], {
+  const result = spawnSync(process.execPath, [scriptPath, "task", "--json", "--kill-after-ms", String(STOP_REVIEW_KILL_AFTER_MS), prompt], {
     cwd,
     env: childEnv,
     encoding: "utf8",
@@ -170,6 +177,17 @@ function currentHead(cwd) {
   }
 }
 
+function collectStopSnapshot(cwd) {
+  try {
+    const review = collectReviewInput(cwd, { scope: "auto" });
+    const head = currentHead(cwd) ?? "no-head";
+    const input = String(review.input ?? "");
+    return { input, diffHash: createHash("sha256").update(`${head}\0${input}`).digest("hex") };
+  } catch {
+    return { input: "", diffHash: createHash("sha256").update(`unavailable\0${cwd}`).digest("hex") };
+  }
+}
+
 // The cheapest possible answer to "is there anything to review": ask git, not a
 // model. `prompts/stop-review-gate.md` already tells the model to allow when
 // nothing changed — this turns that intent into a mechanism instead of paying
@@ -227,7 +245,8 @@ function main() {
   const config = getConfig(workspaceRoot);
   const sessionId = input.session_id || process.env[SESSION_ID_ENV] || null;
 
-  const jobs = filterJobsForCurrentSession(listJobs(workspaceRoot), input);
+  const allJobs = listJobs(workspaceRoot);
+  const jobs = filterJobsForCurrentSession(allJobs, input);
   const runningJob = jobs.find((job) => job.status === "queued" || job.status === "running");
   const runningTaskNote = runningJob
     ? `opencode job ${runningJob.id} is still running. Check /opencode:status and use /opencode:cancel ${runningJob.id} if you want to stop it before ending the session.`
@@ -251,16 +270,26 @@ function main() {
     return;
   }
 
-  const availability = getOpencodeAvailability();
-  if (!availability.available || !availability.usable) {
-    logNote(`opencode is not set up for the review gate. ${availability.detail ?? ""} Run /opencode:setup.`);
-    if (runningTaskNote) {
-      emitDecision({ systemMessage: runningTaskNote });
+  const snapshot = collectStopSnapshot(cwd);
+  const reusable = allJobs.find(
+    (job) => job.origin === "stop-gate" && job.diffHash === snapshot.diffHash && (job.status === "queued" || job.status === "running")
+  );
+  let review;
+  if (reusable) {
+    review = {
+      verdict: "error",
+      reason: `same-diff gate job ${reusable.id} is still running; resume with opencode-companion.mjs result ${reusable.id} --wait --json`,
+      jobId: reusable.id
+    };
+  } else {
+    const availability = getOpencodeAvailability();
+    if (!availability.available || !availability.usable) {
+      logNote(`opencode is not set up for the review gate. ${availability.detail ?? ""} Run /opencode:setup.`);
+      if (runningTaskNote) emitDecision({ systemMessage: runningTaskNote });
+      return;
     }
-    return;
+    review = runStopReview(cwd, input, { availabilityChecked: true, snapshot });
   }
-
-  const review = runStopReview(cwd, input, { availabilityChecked: true });
   recordHead(workspaceRoot, cwd);
 
   // Fail open. A blocked stop caused by the gate's own failure is worse than a

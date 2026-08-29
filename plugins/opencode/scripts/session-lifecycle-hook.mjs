@@ -3,7 +3,6 @@
 import fs from "node:fs";
 import process from "node:process";
 
-import { terminateProcessTree } from "./lib/process.mjs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -14,7 +13,7 @@ import {
   SESSION_ID_ENV,
   TRANSCRIPT_PATH_ENV
 } from "./lib/session-env.mjs";
-import { listJobs, resolveStateFile, upsertJob } from "./lib/state.mjs";
+import { listJobs, resolveStateFile } from "./lib/state.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
 function readHookInput() {
@@ -50,8 +49,9 @@ function handleSessionStart(input) {
   appendEnvVar(COMPANION_BIN_ENV, path.join(path.dirname(fileURLToPath(import.meta.url)), "opencode-companion.mjs"));
 }
 
-// Terminate this session's still-running jobs but keep their records so
-// /opencode:result stays useful across sessions; MAX_JOBS pruning bounds growth.
+// Persistent jobs deliberately outlive the Claude session that submitted them.
+// Reading the store still reconciles workers that actually died; SessionEnd must
+// never turn a healthy detached worker into a cancellation.
 function handleSessionEnd(input) {
   const cwd = input.cwd || process.cwd();
   const sessionId = input.session_id || process.env[SESSION_ID_ENV] || null;
@@ -64,27 +64,7 @@ function handleSessionEnd(input) {
     return;
   }
 
-  for (const job of listJobs(workspaceRoot)) {
-    if (job.sessionId !== sessionId) {
-      continue;
-    }
-    if (job.status !== "running" && job.status !== "queued") {
-      continue;
-    }
-    try {
-      terminateProcessTree(job.childPid ?? Number.NaN);
-    } catch {
-      // Ignore teardown failures during session shutdown.
-    }
-    upsertJob(workspaceRoot, {
-      id: job.id,
-      status: "cancelled",
-      // Terminal verdict: a stale `orphaned` label must not survive it.
-      failureClass: null,
-      endedAt: new Date().toISOString(),
-      summary: "cancelled at session end"
-    });
-  }
+  listJobs(workspaceRoot);
 }
 
 function main() {

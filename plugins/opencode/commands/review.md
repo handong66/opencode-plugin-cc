@@ -32,9 +32,8 @@ Execution mode rules:
   - `Run in background`
 
 Argument handling:
-- Preserve the user's arguments exactly, except for the two execution flags.
-- `--wait` and `--background` are Claude Code execution flags. Use them to pick the flow above, then remove them from the string you pass to the companion; call what is left `COMPANION_ARGS`.
-- The companion always runs in the foreground and now **rejects** `--background` with a non-zero exit, so forwarding it fails the run outright. Claude Code's `Bash(..., run_in_background: true)` is what actually detaches it.
+- Preserve the user's arguments exactly and forward `--wait` or `--background` to the companion. They are mutually exclusive.
+- `--kill-after-ms` is the hard provider budget; `--wait-timeout-ms` is only the foreground observer budget.
 - Do not add extra review instructions or rewrite the user's intent.
 - Target selection: `--base <ref>` reviews `<ref>...HEAD`; `--base A..B` and `--base A...B` are accepted as written; `--head <ref>` moves the other end and therefore needs `--base` as well (on its own it is rejected, not quietly turned into a working-tree review); `--paths <glob,...>` (alias `--files`) limits the review to those pathspecs. Preserve whichever the user gave.
 - `--base X --head Y` diffs `X...Y` — from the merge base, so the review sees what `Y` added rather than everything `X` gained meanwhile. That is what a branch review wants; a caller who means the literal two-dot range writes `--base X..Y`.
@@ -58,13 +57,13 @@ Bash({
 - Do not fix any issues mentioned in the review output.
 
 Background flow:
-- Launch the review with `Bash` in the background:
+- Submit the review to the companion's persistent worker:
 ```typescript
 Bash({
-  command: `node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" review "COMPANION_ARGS"`,
+  command: `node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" review --background "COMPANION_ARGS"`,
   description: "opencode review",
-  run_in_background: true
+  timeout: 10000
 })
 ```
-- Do not call `BashOutput` or wait for completion in this turn.
+- Capture and relay the returned `jobId`; do not wait for completion in this turn.
 - After launching the command, tell the user: "opencode review started in the background. Check `/opencode:status` for progress."

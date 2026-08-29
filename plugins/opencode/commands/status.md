@@ -1,6 +1,6 @@
 ---
 description: Show active and recent opencode jobs for this repository, including review-gate status
-argument-hint: '[job-id] [--wait] [--timeout-ms <ms>] [--all]'
+argument-hint: '[job-id] [--wait] [--wait-timeout-ms <ms>] [--all] [--json]'
 disable-model-invocation: true
 allowed-tools: Bash(node:*)
 ---
