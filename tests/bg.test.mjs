@@ -8,28 +8,23 @@ import { REPO_ROOT, makeFakeEnv, makeTempGitRepo, runCompanion } from "./helpers
 
 const STATE_MODULE = path.join(REPO_ROOT, "plugins", "opencode", "scripts", "lib", "state.mjs");
 
-// P-BG 1: `--background` is a Claude Code execution flag. Consuming it silently
-// let two 2026-07-21 runs believe they had been detached while they were still
-// on the 2-minute Bash wall that then killed them.
-test("task rejects --background instead of silently swallowing it", () => {
+test("task accepts --background and returns a persistent job handle", () => {
   const fake = makeFakeEnv();
   const cwd = makeTempGitRepo();
 
-  const result = runCompanion(["task", "--background", "--write", "do the thing"], { env: fake.env, cwd });
-  assert.equal(result.status, 1, "a swallowed execution flag must not look like a successful run");
-  assert.match(result.stderr, /--background is a Claude Code execution flag/);
-  assert.match(result.stderr, /Bash\(run_in_background: true\)/);
-  assert.equal(fs.existsSync(fake.argsFile), false, "opencode must not be spawned for a rejected flag");
-
-  const jobs = JSON.parse(runCompanion(["status", "--json", "--all"], { env: fake.env, cwd }).stdout).jobs;
-  assert.equal(jobs.length, 0, "a rejected invocation must not leave a job record");
+  const result = runCompanion(["task", "--background", "--json", "--write", "do the thing"], { env: fake.env, cwd });
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.schemaVersion, 2);
+  assert.match(payload.jobId, /^task-/);
+  assert.equal(payload.job.terminal, false);
 });
 
-test("review rejects --background too", () => {
+test("review accepts --background too", () => {
   const fake = makeFakeEnv({ mode: "review-json" });
-  const result = runCompanion(["review", "--background"], { env: fake.env, cwd: makeTempGitRepo() });
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /--background is a Claude Code execution flag/);
+  const result = runCompanion(["review", "--background", "--json"], { env: fake.env, cwd: makeTempGitRepo() });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(JSON.parse(result.stdout).jobId, /^review-/);
 });
 
 // `--wait` keeps its no-op status: the companion is a foreground runner, which
@@ -69,7 +64,7 @@ test("task --timeout-ms kills the run and records failureClass timeout", () => {
   assert.equal(jobs[0].failureClass, "timeout");
 
   const rendered = runCompanion(["result", jobs[0].id], { env: fake.env, cwd }).stdout;
-  assert.match(rendered, /stopped by the companion after 2000ms/);
+  assert.match(rendered, /stopped by the detached worker after 2000ms/);
   assert.match(rendered, /failed \(timeout\)/);
 });
 
@@ -80,7 +75,7 @@ test("task rejects a non-numeric --timeout-ms", () => {
     cwd: makeTempGitRepo()
   });
   assert.equal(result.status, 1);
-  assert.match(result.stdout + result.stderr, /--timeout-ms must be a positive number/);
+  assert.match(result.stdout + result.stderr, /--timeout-ms must be a positive integer number/);
 });
 
 // P-BG 2: `result --wait` is the primitive the two hand-written
@@ -179,7 +174,7 @@ test("status --wait validates --timeout-ms the same way", () => {
   const result = runCompanion(["status", jobId, "--wait", "--timeout-ms", "later"], { env: fake.env, cwd });
   const output = result.stdout + result.stderr;
   assert.equal(result.status, 1, output);
-  assert.match(output, /--timeout-ms must be a positive number of milliseconds \(got later\)/);
+  assert.match(output, /--timeout-ms must be a positive integer number of milliseconds \(got later\)/);
   assert.doesNotMatch(output, /No job found/, "the job exists, so this must be the budget error");
   assert.ok(
     Date.now() - startedAt < 15_000,

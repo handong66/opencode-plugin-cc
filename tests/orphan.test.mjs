@@ -34,11 +34,7 @@ function isAlive(pid) {
   }
 }
 
-// P-ORPHAN: the companion had no SIGTERM/SIGINT/SIGHUP handler at all, so a
-// Bash timeout (3 recorded `Exit code 143`) left the detached opencode child
-// running — 2026-07-17T14:51:30 needed `kill -9` on two pids by hand — and the
-// job record frozen at `running` with nothing stored.
-test("a terminated companion kills its child, labels the job, and keeps partial output", async () => {
+test("a terminated foreground submitter leaves its detached worker and provider running", async () => {
   const fake = makeFakeEnv({
     mode: "hang",
     extra: { OPENCODE_FAKE_TEXT: "halfway through the investigation" }
@@ -66,19 +62,15 @@ test("a terminated companion kills its child, labels the job, and keeps partial 
   assert.equal(outcome.signal, "SIGTERM", `expected death by SIGTERM, got ${JSON.stringify(outcome)}`);
 
   await sleep(500);
-  assert.equal(isAlive(childPid), false, "the detached opencode child must not outlive the companion");
-
+  assert.equal(isAlive(childPid), true, "the provider must outlive the foreground submitter");
   const job = readJobs(fake, cwd).find((candidate) => candidate.id === running.id);
-  assert.equal(job.status, "failed");
-  assert.equal(job.failureClass, "interrupted");
-  assert.match(job.summary, /terminated/);
+  assert.equal(job.status, "running");
+  assert.ok(job.workerPid, "the persistent owner must be recorded");
 
-  const stored = runCompanion(["result", running.id], { env: fake.env, cwd });
-  assert.match(stored.stdout, /halfway through the investigation/, "buffered output must survive the kill");
-  assert.match(stored.stdout, /failed \(interrupted\)/);
-
-  const detail = runCompanion(["status", running.id], { env: fake.env, cwd }).stdout;
-  assert.match(detail, /Status: failed \(interrupted\)/);
+  const cancelled = runCompanion(["cancel", running.id], { env: fake.env, cwd });
+  assert.equal(cancelled.status, 0, cancelled.stderr);
+  await sleep(500);
+  assert.equal(isAlive(childPid), false, "explicit cancel must still terminate the provider tree");
 });
 
 // The handler shares its job store with `cancel` and the SessionEnd hook, so it

@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 
-import { makeFakeEnv, makeTempGitRepo, REPO_ROOT, runCompanion } from "./helpers.mjs";
+import { makeFakeEnv, makeTempGitRepo, readRunArgs, REPO_ROOT, runCompanion } from "./helpers.mjs";
+import { collectReviewInput } from "../plugins/opencode/scripts/lib/git.mjs";
 
 const HOOK = path.join(REPO_ROOT, "plugins", "opencode", "scripts", "stop-review-gate-hook.mjs");
 
@@ -28,6 +30,34 @@ function commitEverything(cwd) {
   git(["add", "-A"]);
   git(["commit", "--quiet", "-m", "seed"]);
 }
+
+test("a running stop-gate job for the same submitted diff is reused", () => {
+  const fake = makeFakeEnv({ mode: "hang" });
+  const cwd = makeTempGitRepo();
+  enableGate(fake, cwd);
+  const snapshot = collectReviewInput(cwd, { scope: "auto" }).input;
+  const diffHash = createHash("sha256").update(`no-head\0${snapshot}`).digest("hex");
+  const env = {
+    ...fake.env,
+    OPENCODE_COMPANION_JOB_ORIGIN: "stop-gate",
+    OPENCODE_COMPANION_DIFF_HASH: diffHash
+  };
+  const submitted = runCompanion(
+    ["task", "--background", "--json", "--kill-after-ms", "20000", "--write", "--", "existing gate"],
+    { env, cwd }
+  );
+  assert.equal(submitted.status, 0, submitted.stderr);
+  const jobId = JSON.parse(submitted.stdout).jobId;
+
+  const result = runHook({ cwd, session_id: "s1" }, { env: fake.env, cwd });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, new RegExp(jobId));
+  const jobs = JSON.parse(runCompanion(["status", "--all", "--json"], { env: fake.env, cwd }).stdout).jobs;
+  assert.equal(jobs.length, 1, "the hook must not submit a duplicate job for the same diff");
+  assert.equal(jobs[0].origin, "stop-gate");
+  assert.equal(jobs[0].diffHash, diffHash);
+  runCompanion(["cancel", jobId], { env: fake.env, cwd });
+});
 
 // P-GATE 1: Claude Code sets stop_hook_active on the Stop that follows a
 // blocked one. There was no check for it anywhere in the repo, so the gate had
@@ -133,6 +163,7 @@ test("a compact ALLOW after tool calls allows the stop quietly", () => {
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout.trim(), "");
   assert.doesNotMatch(result.stderr, /could not complete/);
+  assert.match(readRunArgs(fake).join("\n"), /export const value = 42/, "the gate prompt must carry the submission-time diff snapshot");
 });
 
 // Fail-open is still the rule for everything that is not a verdict: an answer
@@ -236,7 +267,13 @@ test("an unreclaimed job is reported to the session, not to stderr", () => {
   const storeDir = path.join(stateRoot, fs.readdirSync(stateRoot)[0]);
   const stateFile = path.join(storeDir, "state.json");
   const state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
-  state.jobs = state.jobs.map((job) => ({ ...job, status: "running", childPid: process.pid, sessionId: "s1" }));
+  state.jobs = state.jobs.map((job) => ({
+    ...job,
+    status: "running",
+    workerPid: process.pid,
+    childPid: process.pid,
+    sessionId: "s1"
+  }));
   fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
 
   const result = runHook({ cwd, session_id: "s1" }, { env: fake.env, cwd });

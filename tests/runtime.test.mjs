@@ -290,18 +290,18 @@ function stageVersionedInstall(versions, running) {
 
 test("a newer install sitting next to the running one is named on stderr", () => {
   const fake = makeFakeEnv();
-  const entry = stageVersionedInstall(["0.2.0", "0.2.1", "0.3.0"], "0.2.0");
+  const entry = stageVersionedInstall(["0.3.0", "0.3.1", "0.4.0"], "0.3.0");
 
   const result = spawnSync(process.execPath, [entry, "--help"], { env: fake.env, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stderr, /a newer install of this plugin exists \(0\.3\.0\)/, "the highest one, by version");
-  assert.match(result.stderr, /you are running 0\.2\.0 from /);
+  assert.match(result.stderr, /a newer install of this plugin exists \(0\.4\.0\)/, "the highest one, by version");
+  assert.match(result.stderr, /you are running 0\.3\.0 from /);
   assert.match(result.stderr, /OPENCODE_COMPANION_BIN/, "and it must say what to use instead");
   // A warning, not a replacement: the help the caller asked for is still there.
-  assert.match(result.stdout, /^opencode-companion 0\.2\.0 —/);
+  assert.match(result.stdout, /^opencode-companion 0\.3\.0 —/);
 
   // Only *newer* counts, and an unversioned checkout has nothing to compare.
-  const newest = stageVersionedInstall(["0.1.0", "0.2.0"], "0.2.0");
+  const newest = stageVersionedInstall(["0.2.0", "0.3.0"], "0.3.0");
   const quiet = spawnSync(process.execPath, [newest, "--help"], { env: fake.env, encoding: "utf8" });
   assert.equal(quiet.status, 0, quiet.stderr);
   assert.doesNotMatch(quiet.stderr, /newer install/);

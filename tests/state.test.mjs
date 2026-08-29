@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { test } from "node:test";
 
 import { makeTempDir } from "./helpers.mjs";
@@ -7,7 +8,7 @@ import { makeTempDir } from "./helpers.mjs";
 // so an installed plugin's SessionStart export cannot leak in.
 process.env.OPENCODE_COMPANION_DATA_DIR = makeTempDir("opencode-state-test");
 process.env.CLAUDE_PLUGIN_DATA = makeTempDir("opencode-state-decoy");
-const { upsertJob, findJob, listJobs, setConfig, getConfig, resolveStateDir, resolveStateLocation } =
+const { upsertJob, findJob, listJobs, setConfig, getConfig, resolveStateDir, resolveStateLocation, resolveJobInputFile, writeJobInputFile, claimJobInputFile } =
   await import("../plugins/opencode/scripts/lib/state.mjs");
 
 const cwd = makeTempDir("opencode-state-workspace");
@@ -16,6 +17,15 @@ test("state dir lands under the namespaced data dir", () => {
   const location = resolveStateLocation(cwd);
   assert.ok(location.dir.startsWith(process.env.OPENCODE_COMPANION_DATA_DIR));
   assert.equal(location.source, "plugin-data");
+});
+
+test("private job input is mode 0600 and can only be claimed once", () => {
+  const id = "task-private-input";
+  writeJobInputFile(cwd, id, { prepared: { prompt: "secret" } });
+  assert.equal(fs.statSync(resolveJobInputFile(cwd, id)).mode & 0o777, 0o600);
+  assert.equal(claimJobInputFile(cwd, id).prepared.prompt, "secret");
+  assert.equal(fs.existsSync(resolveJobInputFile(cwd, id)), false);
+  assert.throws(() => claimJobInputFile(cwd, id), /ENOENT/);
 });
 
 test("upsertJob inserts then patches without losing fields", () => {

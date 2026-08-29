@@ -22,11 +22,7 @@ test("rescue invocation templates carry an explicit Bash timeout", () => {
     ["agents/opencode-rescue.md", agent]
   ]) {
     assert.match(text, /timeout:\s*600000/, `${name} must show timeout: 600000 in its Bash template`);
-    assert.match(
-      text,
-      /run_in_background/,
-      `${name} must point long runs at Bash(run_in_background: true)`
-    );
+    assert.match(text, /task --write --background/, `${name} must use companion persistent backgrounding`);
     assert.match(
       text,
       /opencode runs (?:regularly|routinely|often) (?:take|run) longer than (?:two minutes|2 minutes)/i,
@@ -90,7 +86,7 @@ test("rescue docs replace `return nothing` with a structured failure line", () =
       /OPENCODE_RESCUE_FAILED: <reason> \| job=<id[^>]*> \| log=<[^>]*>/,
       `${name} must specify the structured failure line`
     );
-    assert.match(text, /at most one `result <id>`/, `${name} must allow retrieving its own job`);
+    assert.match(text, /one `result <id> --wait --wait-timeout-ms <ms>`|one `result <id>`/, `${name} must allow retrieving its own job`);
     assert.match(text, /never write your own answer/i, `${name} must keep the substitution ban`);
   }
 
@@ -106,15 +102,15 @@ test("rescue docs replace `return nothing` with a structured failure line", () =
     "commands/rescue.md must not ban the recovery the rescue contract requires"
   );
   assert.match(command, /OPENCODE_RESCUE_FAILED/, "commands/rescue.md must name the failure line too");
-  assert.match(command, /at most one `result <id>`/);
+  assert.match(command, /one `result <id> --wait --wait-timeout-ms <ms>`|one `result <id>`/);
 });
 
 // `--background` / `--wait` are Claude-side execution flags; forwarding them to
 // the companion is what made two 2026-07-21 runs die on the 2-minute wall.
-test("rescue docs keep --background as a Claude-side flag, not a companion flag", () => {
+test("rescue docs use companion persistent backgrounding", () => {
   const skill = readDoc("skills", "opencode-cli-runtime", "SKILL.md");
-  assert.match(skill, /Strip it before calling `task`/);
-  assert.doesNotMatch(skill, /opencode-companion\.mjs" task --background/);
+  assert.match(skill, /Forward `--background` or `--wait` to `task`/);
+  assert.match(skill, /opencode-companion\.mjs}" task --write --background/);
 });
 
 // M7 / the repository's documentation ownership layers: a bundled SKILL.md
@@ -133,7 +129,7 @@ test("wall-time budgeting lives in --help and the README, not the bundled skill"
     assert.match(readme, measurement, "and so must the README");
   }
   // What the skill keeps: the primitive and the field semantics.
-  assert.match(skill, /status <id> --wait --timeout-ms <ms>/);
+  assert.match(skill, /status <id> --wait --wait-timeout-ms <ms>/);
   assert.match(skill, /`resultComplete: false`[^\n]*missing seat/);
   assert.match(skill, /`status --help`[^\n]*README/, "the skill must point at the layer that owns the budget");
 });
@@ -144,8 +140,9 @@ test("wall-time budgeting lives in --help and the README, not the bundled skill"
 // is a deliverable: it has to describe the code that shipped.
 test("the changelog's review claims match the runtime that shipped", () => {
   const sections = readDoc("CHANGELOG.md").split(/^## /m);
-  const latest = sections[1];
-  assert.match(latest, /^0\.2\.0\b/, "the first section must be the release being described");
+  assert.match(sections[1], /^0\.3\.0\b/, "the first section must be the current release");
+  const latest = sections.find((section) => /^0\.2\.0\b/.test(section));
+  assert.ok(latest, "the historical 0.2.0 contract notes must remain available");
   assert.doesNotMatch(
     latest,
     /stderr warning naming the dropped text/,
