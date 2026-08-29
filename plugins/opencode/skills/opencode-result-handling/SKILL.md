@@ -54,10 +54,10 @@ Threat-model labels on adversarial reviews:
 
 Job handles:
 - The first line of `task`/`review` stdout is the handle, printed before opencode starts: `Job: <id> (<kind>, running) — poll with /opencode:status <id>`. With `--json` the same handle is a JSON line on stderr (`{"jobId":…,"logFile":…,"pollWith":…}`) so stdout stays one JSON document.
-- Keep that id. It is the only handle for a run that was detached with `Bash(run_in_background: true)`, and it works while the run is still in flight: `status <id> --wait --timeout-ms <ms>` blocks until the job reaches a terminal state and `result <id> --wait` does the same and then prints the output. Never hand-roll a polling loop over the log file.
+- Keep that id. It addresses the detached worker across Claude sessions. Use `status <id> --wait --wait-timeout-ms <ms>` or `result <id> --wait --wait-timeout-ms <ms>`; observer expiry never cancels the job.
 
 Waiting on a job (which call to use, and what its fields mean):
-- `status <id> --wait --timeout-ms <ms>` blocks until the job reaches a terminal state, including a job whose process died, and returns the moment it does. Prefer it to a `sleep`/poll loop, which cannot return early and cannot see a dead job.
+- `status <id> --wait --wait-timeout-ms <ms>` returns on terminal state or with `wait.expired:true`; prefer it to a polling loop. `--kill-after-ms` is the separate provider hard budget.
 - `status --all --json` reports every job's `elapsedMs` and `resultComplete` in one call, so a barrier over several jobs does not need one call per job.
 - `resultComplete: false` on a finished job means "do not count this as an answer" (no final output, or a review with no evidence). Treat it as a missing seat, not as a vote.
 - How long to wait, and how to schedule around it, is not a contract fact and is not decided here: `status --help` and the plugin README carry the measured wall times to budget against.

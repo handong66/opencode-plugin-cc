@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0 — 2026-08-29
+
+- Long tasks now run in detached workers backed by private, atomically claimed job inputs. Claude/Bash/companion exit and SessionEnd stop only the observer; `status`, `result`, and idempotent `cancel` recover by `jobId`.
+- `--kill-after-ms` is the provider hard budget and `--wait-timeout-ms` is the observer budget. `--background` is a real companion flag. The legacy `--timeout-ms` alias is deprecated for one minor release, warns on stderr and in JSON, and is rejected when mixed with its replacement.
+- Machine output is schema v2 with consistent job lifecycle, wait state, recovery commands, worker/child ownership and result-completeness fields.
+
 ## 0.2.0 — 2026-08-16
 
 - `package.json`, the plugin manifest and `marketplace.json` all read 0.2.0, and a test holds them to one plain semver with no local build suffix (the sibling repos ship `0.2.1+codex.<timestamp>` in one file and something else in another, so no artefact can be traced to a commit) and requires this changelog to carry a dated section for the version being released.

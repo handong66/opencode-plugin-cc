@@ -85,7 +85,7 @@ If opencode has no stored credentials yet, run:
 # Continue the previous opencode session
 /opencode:rescue --resume apply the top fix
 
-# Long jobs: Claude Code detaches them, the companion always runs in the foreground
+# Long jobs: the companion submits a detached persistent worker
 /opencode:rescue --background port the parser to TypeScript
 /opencode:status                 # every job, with elapsed time
 /opencode:status <id> --wait     # block until this one finishes
@@ -105,7 +105,7 @@ Exit codes: `0` a real answer, `1` the run failed, `2` the run finished without 
 
 ### How long a run takes, and how to wait for one
 
-`/opencode:status <id> --wait --timeout-ms <ms>` blocks until a job reaches a terminal state and returns the moment it does, so a generous deadline costs nothing when the run is quick; `/opencode:status --all --json` reports every job's `elapsedMs` and `resultComplete` in a single call, which is enough to fence on several jobs at once.
+`--kill-after-ms` is the provider hard budget; `--wait-timeout-ms` only bounds how long the caller observes. `/opencode:status <id> --wait --wait-timeout-ms <ms>` returns on terminal state or with `wait.expired:true` while the detached job keeps running. `--timeout-ms` remains a deprecated context-sensitive alias for this release and is removed next minor.
 
 Budget the deadline against measured wall time rather than intuition: in the recorded corpus an opencode run finishes in a median of ~3 minutes, with a p90 near 5.5 minutes for read-only reviews on the `plan` agent — about 4x slower than the sibling Grok runtime. A 2-minute wait is below this runtime's median, and 16 of 19 recorded three-way aggregations ended up with an empty opencode slot whose answer arrived shortly after the decision had already been made. The same numbers are in `status --help`.
 
