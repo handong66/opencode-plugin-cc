@@ -105,12 +105,47 @@ test("rescue docs replace `return nothing` with a structured failure line", () =
   assert.match(command, /one `result <id> --wait --wait-timeout-ms <ms>`|one `result <id>`/);
 });
 
-// `--background` / `--wait` are Claude-side execution flags; forwarding them to
-// the companion is what made two 2026-07-21 runs die on the 2-minute wall.
+// `--background` / `--wait` belong to the companion. Confusing them with Bash
+// execution controls leaves the provider coupled to the Claude observer.
 test("rescue docs use companion persistent backgrounding", () => {
   const skill = readDoc("skills", "opencode-cli-runtime", "SKILL.md");
+  const command = readDoc("commands", "rescue.md");
   assert.match(skill, /Forward `--background` or `--wait` to `task`/);
   assert.match(skill, /opencode-companion\.mjs}" task --write --background/);
+  assert.match(command, /companion execution controls/);
+  assert.match(command, /Forward exactly one of them to `task`/);
+  assert.doesNotMatch(command, /execution flags for Claude Code/);
+});
+
+test("persistent lifecycle documentation matches the schema-v2 runtime", () => {
+  const readme = fs.readFileSync(path.join(REPO_ROOT, "README.md"), "utf8");
+  const resultSkill = readDoc("skills", "opencode-result-handling", "SKILL.md");
+  const cancel = readDoc("commands", "cancel.md");
+
+  assert.match(readme, /SessionEnd performs maintenance only and never cancels/);
+  assert.doesNotMatch(readme, /session-end hooks terminate still-running jobs/i);
+  assert.match(readme, /private `0700` directory and `0600` input file/);
+  assert.match(readme, /submission-time prompt\/diff|resolved before submission/i);
+  assert.match(readme, /background-submit or wait-expired document[^\n]*may not have model fields/);
+
+  for (const name of ["review.md", "adversarial-review.md"]) {
+    const command = readDoc("commands", name);
+    assert.match(command, /detached persistent worker/);
+    assert.doesNotMatch(command, /Claude background task/);
+    assert.match(command, /later workspace changes do not alter this review/);
+    assert.match(command, /Bash observer times out[^\n]*detached worker keeps running/);
+    assert.match(command, /result <id> --wait --wait-timeout-ms <ms> --json/);
+  }
+
+  for (const field of ["schemaVersion: 2", "jobId", "terminal", "resultComplete", "wait", "warnings[]", "nextAction"]) {
+    assert.ok(resultSkill.includes(field), `result-handling skill must document ${field}`);
+  }
+  assert.match(resultSkill, /status --wait[^\n]*exits 0/);
+  assert.match(resultSkill, /result --wait[^\n]*exits 1/);
+  assert.match(resultSkill, /repeats report `changed:false`/);
+  assert.match(cancel, /argument-hint: '\[job-id\] \[--json\]'/);
+  assert.match(cancel, /unknown job id exits 1/i);
+  assert.match(readDoc("commands", "setup.md"), /same diff hash is reused|same diff.*reused/i);
 });
 
 // M7 / the repository's documentation ownership layers: a bundled SKILL.md

@@ -32,7 +32,7 @@ test("every known subcommand answers -h with its own flags", () => {
     "adversarial-review": /focus text/,
     status: /--wait/,
     result: /--wait/,
-    cancel: /cancel \[job-id\]/,
+    cancel: /cancel \[job-id\] \[--json\]/,
     transfer: /--source/,
     setup: /--enable-review-gate/,
     "task-resume-candidate": /--json/
