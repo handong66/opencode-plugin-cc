@@ -21,6 +21,7 @@ const FALLBACK_STATE_ROOT_DIR = path.join(os.tmpdir(), "opencode-companion");
 const STATE_FILE_NAME = "state.json";
 const JOBS_DIR_NAME = "jobs";
 const MAX_JOBS = 50;
+const TERMINAL_JOB_STATUSES = new Set(["completed", "incomplete", "failed", "cancelled"]);
 
 function nowIso() {
   return new Date().toISOString();
@@ -80,6 +81,12 @@ export function resolveJobsDir(cwd) {
 
 export function ensureStateDir(cwd) {
   fs.mkdirSync(resolveJobsDir(cwd), { recursive: true });
+  try {
+    fs.chmodSync(resolveStateDir(cwd), 0o700);
+    fs.chmodSync(resolveJobsDir(cwd), 0o700);
+  } catch {
+    // Existing stores may live on filesystems that do not expose POSIX modes.
+  }
 }
 
 export function loadState(cwd) {
@@ -135,10 +142,10 @@ function removeFileIfExists(filePath) {
 // either the old file or the new one but never a half-written one — and both
 // `loadState` and `readJobFile` swallow a parse failure, so a torn read shows
 // up as "no jobs" / "no stored output" rather than as an error.
-function writeFileAtomic(filePath, contents) {
+function writeFileAtomic(filePath, contents, { mode } = {}) {
   const tmpFile = `${filePath}.${process.pid}-${Math.random().toString(36).slice(2, 8)}.tmp`;
   try {
-    fs.writeFileSync(tmpFile, contents, "utf8");
+    fs.writeFileSync(tmpFile, contents, { encoding: "utf8", ...(mode ? { mode } : {}) });
     fs.renameSync(tmpFile, filePath);
   } catch (error) {
     removeFileIfExists(tmpFile);
@@ -351,6 +358,7 @@ function saveStateLocked(cwd, state, { attempt = 0 } = {}) {
       continue;
     }
     removeFileIfExists(resolveJobFile(cwd, job.id));
+    removeFileIfExists(resolveJobInputFile(cwd, job.id));
     removeFileIfExists(job.logFile);
   }
 
@@ -393,9 +401,22 @@ export function upsertJob(cwd, jobPatch) {
       });
       return;
     }
+    const existing = state.jobs[existingIndex];
+    // A terminal record is monotonic. A late worker/progress write may enrich it,
+    // but may never put it back into queued/running or replace one terminal
+    // outcome with another after cancel/deadline/completion won the race.
+    const patch = { ...jobPatch };
+    if (
+      TERMINAL_JOB_STATUSES.has(existing.status) &&
+      existing.failureClass !== "orphaned" &&
+      patch.status &&
+      patch.status !== existing.status
+    ) {
+      delete patch.status;
+    }
     state.jobs[existingIndex] = {
-      ...state.jobs[existingIndex],
-      ...jobPatch,
+      ...existing,
+      ...patch,
       updatedAt: timestamp
     };
   });
@@ -414,7 +435,10 @@ export function reconcileJobs(jobs, { now = Date.now(), graceMs = ORPHAN_GRACE_M
       return job;
     }
 
-    const pid = Number(job.childPid);
+    // The detached worker owns the job lifetime. The provider child may briefly
+    // disappear while the worker is still parsing and persisting its result, so
+    // workerPid is authoritative whenever the v2 record has one.
+    const pid = Number(job.workerPid ?? job.childPid);
     const hasPid = Number.isFinite(pid) && pid > 0;
     const lastSeen = Date.parse(job.updatedAt ?? job.startedAt ?? job.createdAt ?? "");
     // No pid yet means either the spawn gap (a live companion, milliseconds
@@ -542,4 +566,27 @@ export function resolveJobLogFile(cwd, jobId) {
 export function resolveJobFile(cwd, jobId) {
   ensureStateDir(cwd);
   return path.join(resolveJobsDir(cwd), `${jobId}.json`);
+}
+
+export function resolveJobInputFile(cwd, jobId) {
+  ensureStateDir(cwd);
+  return path.join(resolveJobsDir(cwd), `${jobId}.input.json`);
+}
+
+export function writeJobInputFile(cwd, jobId, input) {
+  const inputFile = resolveJobInputFile(cwd, jobId);
+  writeFileAtomic(inputFile, `${JSON.stringify(input)}\n`, { mode: 0o600 });
+  fs.chmodSync(inputFile, 0o600);
+  return inputFile;
+}
+
+export function claimJobInputFile(cwd, jobId) {
+  const inputFile = resolveJobInputFile(cwd, jobId);
+  const claimedFile = `${inputFile}.claimed-${process.pid}`;
+  fs.renameSync(inputFile, claimedFile);
+  try {
+    return JSON.parse(fs.readFileSync(claimedFile, "utf8"));
+  } finally {
+    removeFileIfExists(claimedFile);
+  }
 }

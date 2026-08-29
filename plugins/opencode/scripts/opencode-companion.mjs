@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import fs from "node:fs";
+import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -19,7 +20,7 @@ import {
   resolveRunSelection,
   runOpencode
 } from "./lib/opencodecli.mjs";
-import { terminateProcessTree } from "./lib/process.mjs";
+import { isAlive, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
   describeJobStatus,
@@ -42,15 +43,18 @@ import {
   pickResumeCandidate,
   readJobFile,
   resolveJobLogFile,
+  resolveJobInputFile,
   resolveStateDir,
   resolveStateLocation,
   setConfig,
   upsertJob,
+  writeJobInputFile,
   writeJobFile
 } from "./lib/state.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const COMPANION_PATH = fileURLToPath(import.meta.url);
+const JOB_WORKER_PATH = path.join(SCRIPT_DIR, "job-worker.mjs");
 const ROOT_DIR = path.resolve(SCRIPT_DIR, "..");
 const REVIEW_SCHEMA_PATH = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
 const REVIEW_RULES =
@@ -62,8 +66,8 @@ const STATUS_WAIT_DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 // A backstop, not a budget: opencode runs have a measured p90 of ~5.5 minutes,
 // so this only catches runs that are never coming back.
 const RUN_TIMEOUT_DEFAULT_MS = 15 * 60 * 1000;
-const BACKGROUND_FLAG_MESSAGE =
-  "--background is a Claude Code execution flag, not a companion flag; the companion always runs in the foreground. Detach with Bash(run_in_background: true), or use /opencode:rescue --background.";
+const WORKER_ACK_TIMEOUT_MS = 5_000;
+const TERMINAL_STATUSES = new Set(["completed", "incomplete", "failed", "cancelled"]);
 const JOB_ID_PREFIXES = {
   task: "task",
   review: "review",
@@ -210,16 +214,98 @@ function describeNewerInstall() {
   return `a newer install of this plugin exists (${newer}) but you are running ${version} from ${ROOT_DIR}. Use $${COMPANION_BIN_ENV} (exported at SessionStart) or "\${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" instead of a versioned path.`;
 }
 
-// `--background` used to be consumed silently so it could not leak into the
-// prompt. That also meant a caller who passed it believed the run had been
-// detached while it was still on Claude Code's 2-minute Bash wall.
-function rejectsBackgroundFlag(flags) {
-  if (!flags.has("--background")) {
-    return false;
+function positiveIntegerFlag(flags, name, fallback) {
+  const raw = flags.get(name);
+  if (raw === undefined) return { value: fallback };
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    return { error: `${name} must be a positive integer number of milliseconds (got ${raw}).` };
   }
-  process.stderr.write(`${BACKGROUND_FLAG_MESSAGE}\n`);
-  process.exitCode = 1;
+  return { value };
+}
+
+function resolvePersistentOptions(flags) {
+  const background = flags.has("--background");
+  const explicitWait = flags.has("--wait");
+  if (background && explicitWait) {
+    return { error: "Pass either --background or --wait, not both." };
+  }
+  if (background && flags.has("--wait-timeout-ms")) {
+    return { error: "--wait-timeout-ms cannot be used with --background because the submitter does not wait." };
+  }
+  if (flags.has("--timeout-ms") && flags.has("--kill-after-ms")) {
+    return { error: "Pass either deprecated --timeout-ms or --kill-after-ms, not both." };
+  }
+
+  const killFlag = flags.has("--kill-after-ms") ? "--kill-after-ms" : "--timeout-ms";
+  const kill = positiveIntegerFlag(flags, killFlag, RUN_TIMEOUT_DEFAULT_MS);
+  if (kill.error) return kill;
+  const wait = positiveIntegerFlag(flags, "--wait-timeout-ms", STATUS_WAIT_DEFAULT_TIMEOUT_MS);
+  if (wait.error) return wait;
+
+  const warnings = [];
+  if (flags.has("--timeout-ms")) {
+    const warning =
+      "--timeout-ms is deprecated for task/review; use --kill-after-ms. It will be removed in the next minor release.";
+    warnings.push(warning);
+    process.stderr.write(`warning: ${warning}\n`);
+  }
+  return {
+    background,
+    waitRequested: !background,
+    waitTimeoutMs: wait.value,
+    killAfterMs: kill.value,
+    warnings
+  };
+}
+
+function resolveObserverOptions(flags) {
+  if (flags.has("--timeout-ms") && flags.has("--wait-timeout-ms")) {
+    return { error: "Pass either deprecated --timeout-ms or --wait-timeout-ms, not both." };
+  }
+  const hasBudget = flags.has("--timeout-ms") || flags.has("--wait-timeout-ms");
+  if (hasBudget && !flags.has("--wait")) {
+    return { error: "--wait-timeout-ms/--timeout-ms requires --wait." };
+  }
+  const flag = flags.has("--wait-timeout-ms") ? "--wait-timeout-ms" : "--timeout-ms";
+  const wait = positiveIntegerFlag(flags, flag, STATUS_WAIT_DEFAULT_TIMEOUT_MS);
+  if (wait.error) return wait;
+  const warnings = [];
+  if (flags.has("--timeout-ms")) {
+    const warning =
+      "--timeout-ms is deprecated for status/result; use --wait-timeout-ms. It will be removed in the next minor release.";
+    warnings.push(warning);
+    process.stderr.write(`warning: ${warning}\n`);
+  }
+  return { waitTimeoutMs: wait.value, warnings };
+}
+
+function isTerminalJob(job) {
+  if (!job || !TERMINAL_STATUSES.has(job.status)) return false;
+  // Reconciliation is provisional when the owning worker is demonstrably still
+  // alive; its real terminal write must win the child-exit/parse-window race.
+  if (job.failureClass === "orphaned" && isAlive(Number(job.workerPid))) return false;
   return true;
+}
+
+function publicJob(job) {
+  if (!job) return null;
+  return {
+    ...job,
+    provider: "opencode",
+    terminal: isTerminalJob(job),
+    resultComplete: job.resultComplete ?? false,
+    killAfterMs: job.killAfterMs ?? job.timeoutMs ?? RUN_TIMEOUT_DEFAULT_MS,
+    deadlineAt: job.deadlineAt ?? null
+  };
+}
+
+function nextActions(jobId) {
+  return {
+    status: `opencode-companion.mjs status ${jobId} --json`,
+    result: `opencode-companion.mjs result ${jobId} --wait --json`,
+    cancel: `opencode-companion.mjs cancel ${jobId} --json`
+  };
 }
 
 // The one run this process owns, if any. `opencode` is spawned detached so
@@ -343,7 +429,7 @@ function resolveTimeoutMs(flags, defaultMs) {
   return { timeoutMs: value };
 }
 
-async function executeJob({
+export async function runPreparedJob({
   kind,
   cwd,
   opencodeOptions,
@@ -352,10 +438,11 @@ async function executeJob({
   variant = null,
   timeoutMs = RUN_TIMEOUT_DEFAULT_MS,
   asJson = false,
-  extraWarnings = []
+  extraWarnings = [],
+  jobId = generateJobId(JOB_ID_PREFIXES[kind] ?? "job"),
+  workerPid = process.pid
 }) {
   warnAboutStateLocation(cwd);
-  const jobId = generateJobId(JOB_ID_PREFIXES[kind] ?? "job");
   const logFile = resolveJobLogFile(cwd, jobId);
 
   // Recorded before the run, from the same inputs `buildOpencodeArgs` uses, so
@@ -372,7 +459,12 @@ async function executeJob({
     id: jobId,
     kind,
     status: "running",
+    provider: "opencode",
+    schemaVersion: 2,
+    origin: process.env.OPENCODE_COMPANION_JOB_ORIGIN ?? null,
+    diffHash: process.env.OPENCODE_COMPANION_DIFF_HASH ?? null,
     cwd,
+    workerPid,
     sessionId: claudeSessionId(),
     model: selection.model,
     requestedModel: model,
@@ -384,19 +476,10 @@ async function executeJob({
     variant: selection.variant,
     promptPreview: firstLine(promptPreview, 160),
     logFile,
-    startedAt: new Date().toISOString()
+    startedAt: new Date().toISOString(),
+    killAfterMs: timeoutMs,
+    deadlineAt: new Date(Date.now() + timeoutMs).toISOString()
   });
-
-  // The handle goes out before the run starts, not in the footer afterwards: a
-  // caller who detaches the companion with Bash(run_in_background: true) — 28
-  // recorded times — otherwise has no id to poll until the run is already over.
-  // In --json mode it goes to stderr so stdout stays a single JSON document.
-  const handle = { jobId, logFile, pollWith: `/opencode:status ${jobId}`, companionVersion: pluginVersion() };
-  if (asJson) {
-    process.stderr.write(`${JSON.stringify(handle)}\n`);
-  } else {
-    print(`Job: ${jobId} (${kind}, running) — poll with /opencode:status ${jobId}`);
-  }
 
   installSignalHandlers();
   inFlightRun = {
@@ -525,7 +608,8 @@ async function executeJob({
   // being killed; that terminal state wins over the exit-code verdict.
   // Reconciliation is skipped here: this process owns the run and is about to
   // write the real verdict, so the just-exited child must not read as orphaned.
-  const wasCancelled = findJob(cwd, jobId, { reconcile: false })?.status === "cancelled";
+  const currentJob = findJob(cwd, jobId, { reconcile: false });
+  const wasCancelled = currentJob?.status === "cancelled" || Boolean(currentJob?.cancelRequestedAt);
   // A real verdict clears any label reconciliation wrote while this run was in
   // flight; `upsertJob` merges, so omitting the key would keep it. The
   // companion's own reason (it stopped the run) wins over the provider's.
@@ -569,7 +653,7 @@ async function executeJob({
         : incomplete
           ? `incomplete (${classification.reason}, stopReason ${payload.stopReason ?? "unknown"}): ${firstLine(payload.rawOutput, 80)}`
           : payload.timedOut
-            ? `stopped by the companion after ${timeoutMs}ms (--timeout-ms)`
+            ? `stopped by the worker after ${timeoutMs}ms (--kill-after-ms)`
             : `failed (exit ${outcome.exitCode ?? "?"})`
   };
 
@@ -592,6 +676,194 @@ async function executeJob({
   return { ok, incomplete, outputState: classification.state, jobId, job: fullJob, payload };
 }
 
+function pendingPayload(kind, persistence, waitExpired = false) {
+  return {
+    kind,
+    outputState: "running",
+    outputStateReason: waitExpired ? "observer-wait-expired" : "background-submitted",
+    resultComplete: false,
+    failureClass: null,
+    stopReason: null,
+    toolEventCount: 0,
+    evidenceLevel: null,
+    rawOutput: "",
+    warnings: [],
+    timedOut: false
+  };
+}
+
+async function waitForJob(cwd, jobId, predicate, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let job = findJob(cwd, jobId, { reconcile: false });
+  while (!predicate(job) && Date.now() < deadline) {
+    await sleep(100);
+    job = findJob(cwd, jobId, { reconcile: false }) ?? job;
+  }
+  return job;
+}
+
+async function executeJob(prepared) {
+  const persistence = prepared.persistentOptions;
+  if (!persistence) {
+    return runPreparedJob(prepared);
+  }
+
+  const { kind, cwd, promptPreview, timeoutMs } = prepared;
+  const jobId = generateJobId(JOB_ID_PREFIXES[kind] ?? "job");
+  const logFile = resolveJobLogFile(cwd, jobId);
+  const createdAt = new Date().toISOString();
+  upsertJob(cwd, {
+    id: jobId,
+    kind,
+    provider: "opencode",
+    schemaVersion: 2,
+    origin: process.env.OPENCODE_COMPANION_JOB_ORIGIN ?? null,
+    diffHash: process.env.OPENCODE_COMPANION_DIFF_HASH ?? null,
+    status: "queued",
+    cwd,
+    sessionId: claudeSessionId(),
+    promptPreview: firstLine(promptPreview, 160),
+    logFile,
+    createdAt,
+    workerPid: null,
+    childPid: null,
+    killAfterMs: timeoutMs,
+    deadlineAt: null,
+    resultComplete: false
+  });
+  writeJobInputFile(cwd, jobId, {
+    prepared: {
+      ...prepared,
+      persistentOptions: undefined,
+      asJson: false
+    }
+  });
+
+  let worker;
+  try {
+    worker = spawn(process.execPath, [JOB_WORKER_PATH, jobId], {
+      cwd,
+      env: process.env,
+      detached: true,
+      stdio: "ignore"
+    });
+    worker.unref();
+    upsertJob(cwd, { id: jobId, workerPid: worker.pid });
+  } catch (error) {
+    try {
+      fs.unlinkSync(resolveJobInputFile(cwd, jobId));
+    } catch {
+      // The worker may have claimed it before spawn surfaced an error.
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    const payload = {
+      ...pendingPayload(kind, persistence),
+      outputState: "failed",
+      outputStateReason: "worker-start-failed",
+      failureClass: "worker_start_failed",
+      stderrTail: message,
+      rendered: `OpenCode ${kind} job failed before the provider started.\n${message}`
+    };
+    writeJobFile(cwd, jobId, payload);
+    upsertJob(cwd, {
+      id: jobId,
+      status: "failed",
+      failureClass: "worker_start_failed",
+      endedAt: new Date().toISOString(),
+      summary: message
+    });
+    return { ok: false, incomplete: false, outputState: "failed", jobId, job: findJob(cwd, jobId), payload };
+  }
+
+  const handle = {
+    schemaVersion: 2,
+    jobId,
+    logFile,
+    pollWith: `/opencode:status ${jobId}`,
+    companionVersion: pluginVersion()
+  };
+  if (prepared.asJson) {
+    process.stderr.write(`${JSON.stringify(handle)}\n`);
+  } else {
+    print(`Job: ${jobId} (${kind}, running) — poll with /opencode:status ${jobId}`);
+  }
+
+  let job = await waitForJob(
+    cwd,
+    jobId,
+    (candidate) => Boolean(candidate?.workerClaimedAt) || isTerminalJob(candidate),
+    WORKER_ACK_TIMEOUT_MS
+  );
+  if (!job?.workerClaimedAt && !isTerminalJob(job)) {
+    if (isAlive(worker.pid)) terminateProcessTree(worker.pid);
+    const message = `detached worker did not claim job within ${WORKER_ACK_TIMEOUT_MS}ms`;
+    const payload = {
+      ...pendingPayload(kind, persistence),
+      outputState: "failed",
+      outputStateReason: "worker-start-failed",
+      failureClass: "worker_start_failed",
+      stderrTail: message,
+      rendered: `OpenCode ${kind} job failed before the provider started.\n${message}`
+    };
+    writeJobFile(cwd, jobId, payload);
+    upsertJob(cwd, {
+      id: jobId,
+      status: "failed",
+      failureClass: "worker_start_failed",
+      endedAt: new Date().toISOString(),
+      summary: message
+    });
+    job = findJob(cwd, jobId, { reconcile: false });
+    return { ok: false, incomplete: false, outputState: "failed", jobId, job, payload };
+  }
+
+  if (persistence.background && !isTerminalJob(job)) {
+    return {
+      ok: true,
+      incomplete: false,
+      outputState: "running",
+      jobId,
+      job,
+      payload: pendingPayload(kind, persistence),
+      dispatched: true,
+      wait: { requested: false, timeoutMs: persistence.waitTimeoutMs, expired: false }
+    };
+  }
+
+  if (!isTerminalJob(job)) {
+    job = await waitForJob(cwd, jobId, isTerminalJob, persistence.waitTimeoutMs);
+  }
+  if (!isTerminalJob(job)) {
+    return {
+      ok: true,
+      incomplete: false,
+      outputState: "running",
+      jobId,
+      job,
+      payload: pendingPayload(kind, persistence, true),
+      dispatched: true,
+      wait: { requested: true, timeoutMs: persistence.waitTimeoutMs, expired: true }
+    };
+  }
+
+  const payload = readJobFile(cwd, jobId) ?? pendingPayload(kind, persistence);
+  for (const warning of payload.warnings ?? []) {
+    const message = typeof warning === "string" ? warning : warning?.message;
+    if (message) process.stderr.write(`warning: ${message}\n`);
+  }
+  const outputState = payload.outputState ?? (job.status === "completed" ? "completed" : job.status);
+  return {
+    ok: outputState === "completed",
+    incomplete: outputState === "incomplete",
+    outputState,
+    jobId,
+    job,
+    payload,
+    dispatched: true,
+    wait: { requested: true, timeoutMs: persistence.waitTimeoutMs, expired: false }
+  };
+}
+
 // 0 = a real answer, 1 = the run failed, 2 = the run ended without an answer.
 function exitCodeForOutputState(outputState) {
   if (outputState === "completed") {
@@ -602,7 +874,16 @@ function exitCodeForOutputState(outputState) {
 
 async function commandTask(tokens) {
   const { flags, rest, errors, unknownFlags } = parseFlags(tokens, {
-    valueFlags: ["--model", "--variant", "--effort", "--timeout-ms", "--prompt-file", "--resume-session"],
+    valueFlags: [
+      "--model",
+      "--variant",
+      "--effort",
+      "--timeout-ms",
+      "--kill-after-ms",
+      "--wait-timeout-ms",
+      "--prompt-file",
+      "--resume-session"
+    ],
     booleanFlags: [
       "--json",
       "--write",
@@ -619,9 +900,6 @@ async function commandTask(tokens) {
     process.exitCode = 1;
     return;
   }
-  if (rejectsBackgroundFlag(flags)) {
-    return;
-  }
   // A `--flag` before any task text is a mistyped flag, not prose: running it
   // as prompt text is how `--help` cost three real model turns.
   if (unknownFlags.length > 0) {
@@ -631,9 +909,9 @@ async function commandTask(tokens) {
     process.exitCode = 1;
     return;
   }
-  const timeout = resolveTimeoutMs(flags, RUN_TIMEOUT_DEFAULT_MS);
-  if (timeout.error) {
-    print(timeout.error);
+  const persistence = resolvePersistentOptions(flags);
+  if (persistence.error) {
+    print(persistence.error);
     process.exitCode = 1;
     return;
   }
@@ -702,13 +980,14 @@ async function commandTask(tokens) {
     }
   }
 
-  const { ok, jobId, outputState, payload } = await executeJob({
+  const { ok, jobId, outputState, payload, job, wait, dispatched } = await executeJob({
     kind: "task",
     cwd,
     model: flags.get("--model") ?? null,
     variant,
-    timeoutMs: timeout.timeoutMs,
+    timeoutMs: persistence.killAfterMs,
     asJson,
+    persistentOptions: persistence,
     promptPreview: taskText,
     opencodeOptions: {
       prompt: taskText,
@@ -723,8 +1002,12 @@ async function commandTask(tokens) {
 
   if (asJson) {
     printJson({
+      schemaVersion: 2,
       ok,
       jobId,
+      job: publicJob(job ?? findJob(cwd, jobId, { reconcile: false })),
+      wait: wait ?? { requested: true, timeoutMs: persistence.waitTimeoutMs, expired: false },
+      nextAction: nextActions(jobId),
       outputState,
       outputStateReason: payload.outputStateReason,
       resultComplete: payload.resultComplete,
@@ -746,13 +1029,16 @@ async function commandTask(tokens) {
       resumedFrom,
       exitCode: payload.exitCode,
       timedOut: payload.timedOut,
-      warnings: payload.warnings,
+      warnings: [...persistence.warnings, ...(payload.warnings ?? [])],
       stderrTail: ok ? undefined : payload.stderrTail
     });
   } else {
-    print(payload.rendered);
+    print(
+      payload.rendered ??
+        `Job ${jobId} is still running. Retrieve it with /opencode:result ${jobId} --wait --wait-timeout-ms ${persistence.waitTimeoutMs}.`
+    );
   }
-  process.exitCode = exitCodeForOutputState(outputState);
+  process.exitCode = dispatched && outputState === "running" ? 0 : exitCodeForOutputState(outputState);
 }
 
 const REVIEW_SCOPES = ["auto", "working-tree", "branch"];
@@ -780,7 +1066,9 @@ const REVIEW_VALUE_FLAGS = [
   "--rubric-file",
   "--model",
   "--variant",
-  "--timeout-ms"
+  "--timeout-ms",
+  "--kill-after-ms",
+  "--wait-timeout-ms"
 ];
 // `--threat-model` is only meaningful where a prompt has a slot for it. It used
 // to sit in the shared flag list, so plain `review` accepted it, escaped the
@@ -792,7 +1080,7 @@ function reviewFlagSummary(adversarial) {
   const flags = [...REVIEW_VALUE_FLAGS, ...(adversarial ? ["--threat-model <text>"] : [])]
     .map((flag) => (flag === "--base" ? "--base <ref|A..B|A...B>" : flag))
     .join(", ");
-  return `Supported: ${flags}, --json.${
+  return `Supported: ${flags}, --json, --wait, --background.${
     adversarial ? "" : " (--threat-model is an adversarial-review flag: only that prompt judges findings against a boundary.)"
   }`;
 }
@@ -805,9 +1093,6 @@ async function commandReview(tokens, { adversarial }) {
   if (errors.length > 0) {
     print(`Invalid arguments: ${errors.join("; ")}`);
     process.exitCode = 1;
-    return;
-  }
-  if (rejectsBackgroundFlag(flags)) {
     return;
   }
   // A flag this command does not know used to land in `rest`, which only the
@@ -829,9 +1114,9 @@ async function commandReview(tokens, { adversarial }) {
     process.exitCode = 1;
     return;
   }
-  const timeout = resolveTimeoutMs(flags, RUN_TIMEOUT_DEFAULT_MS);
-  if (timeout.error) {
-    print(timeout.error);
+  const persistence = resolvePersistentOptions(flags);
+  if (persistence.error) {
+    print(persistence.error);
     process.exitCode = 1;
     return;
   }
@@ -953,14 +1238,15 @@ async function commandReview(tokens, { adversarial }) {
         }
       ]
     : [];
-  const { ok, jobId, outputState, payload } = await executeJob({
+  const { ok, jobId, outputState, payload, job, wait, dispatched } = await executeJob({
     kind,
     cwd,
     model,
     variant,
     extraWarnings,
-    timeoutMs: timeout.timeoutMs,
+    timeoutMs: persistence.killAfterMs,
     asJson,
+    persistentOptions: persistence,
     promptPreview: adversarial
       ? `adversarial review of ${reviewInput.label}${focus ? `: ${focus}` : ""}`
       : `review of ${reviewInput.label}`,
@@ -977,11 +1263,15 @@ async function commandReview(tokens, { adversarial }) {
 
   if (asJson) {
     printJson({
+      schemaVersion: 2,
       ok,
       // `task --json` has always carried the handle; a review's was only on the
       // stderr handle line, so a caller that wanted to fetch the full payload
       // later had to scrape it back out of narration.
       jobId,
+      job: publicJob(job ?? findJob(cwd, jobId, { reconcile: false })),
+      wait: wait ?? { requested: true, timeoutMs: persistence.waitTimeoutMs, expired: false },
+      nextAction: nextActions(jobId),
       outputState,
       outputStateReason: payload.outputStateReason,
       resultComplete: payload.resultComplete,
@@ -996,7 +1286,7 @@ async function commandReview(tokens, { adversarial }) {
       modelCertainty: payload.modelCertainty,
       agent: payload.agent,
       variant: payload.variant,
-      warnings: payload.warnings,
+      warnings: [...persistence.warnings, ...(payload.warnings ?? [])],
       // Only a finished run has a verdict. A blacklisted `stopReason` makes a
       // run `incomplete` even when the JSON it had already emitted validates,
       // and this field used to be populated anyway — so the human render said
@@ -1007,9 +1297,12 @@ async function commandReview(tokens, { adversarial }) {
       rawOutput: payload.rawOutput
     });
   } else {
-    print(payload.rendered);
+    print(
+      payload.rendered ??
+        `Job ${jobId} is still running. Retrieve it with /opencode:result ${jobId} --wait --wait-timeout-ms ${persistence.waitTimeoutMs}.`
+    );
   }
-  process.exitCode = exitCodeForOutputState(outputState);
+  process.exitCode = dispatched && outputState === "running" ? 0 : exitCodeForOutputState(outputState);
 }
 
 // X10: 0.1-era plugins wrote job state into the user's repository. The user
@@ -1151,7 +1444,7 @@ function withElapsed(job) {
       ? Date.now() - createdAt
       : null
     : (job.durationMs ?? null);
-  return { ...job, elapsedMs, resultComplete: job.resultComplete ?? null };
+  return publicJob({ ...job, elapsedMs, resultComplete: job.resultComplete ?? null });
 }
 
 // `parseFlags` records `--timeout-ms requires a value` and then carries on, so
@@ -1175,13 +1468,13 @@ function rejectsFlagProblems({ errors, unknownFlags }, { command, supported }) {
 
 async function commandStatus(tokens) {
   const { flags, rest, errors, unknownFlags } = parseFlags(tokens, {
-    valueFlags: ["--timeout-ms"],
+    valueFlags: ["--timeout-ms", "--wait-timeout-ms"],
     booleanFlags: ["--json", "--all", "--wait"]
   });
   if (
     rejectsFlagProblems(
       { errors, unknownFlags },
-      { command: "status", supported: "--json, --all, --wait, --timeout-ms <ms>" }
+      { command: "status", supported: "--json, --all, --wait, --wait-timeout-ms <ms>" }
     )
   ) {
     return;
@@ -1197,14 +1490,20 @@ async function commandStatus(tokens) {
       process.exitCode = 1;
       return;
     }
+    const observer = resolveObserverOptions(flags);
+    if (observer.error) {
+      print(observer.error);
+      process.exitCode = 1;
+      return;
+    }
+    let waitExpired = false;
     if (flags.has("--wait")) {
-      const timeout = resolveTimeoutMs(flags, STATUS_WAIT_DEFAULT_TIMEOUT_MS);
-      if (timeout.error) {
-        print(timeout.error);
+      if (observer.error) {
+        print(observer.error);
         process.exitCode = 1;
         return;
       }
-      const deadline = Date.now() + timeout.timeoutMs;
+      const deadline = Date.now() + observer.waitTimeoutMs;
       // findJob reconciles, so a job whose process died returns a terminal
       // status and this loop stops immediately instead of waiting out the
       // whole budget on a record that can never change again.
@@ -1212,6 +1511,7 @@ async function commandStatus(tokens) {
         await sleep(STATUS_WAIT_POLL_MS);
         job = findJob(cwd, jobId) ?? job;
       }
+      waitExpired = !isTerminalJob(job);
     }
     const payload = readJobFile(cwd, jobId);
     if (flags.has("--json")) {
@@ -1219,10 +1519,18 @@ async function commandStatus(tokens) {
       // carry it: a caller that reads `doc.jobId` across the four documents
       // should not have to know that two of them hide the id one level down.
       printJson({
+        schemaVersion: 2,
         jobId: job.id,
         job: withElapsed(job),
         hasResult: Boolean(payload),
-        resultComplete: payload?.resultComplete ?? job.resultComplete ?? null
+        resultComplete: payload?.resultComplete ?? job.resultComplete ?? null,
+        wait: {
+          requested: flags.has("--wait"),
+          timeoutMs: observer.waitTimeoutMs,
+          expired: waitExpired
+        },
+        warnings: observer.warnings,
+        nextAction: nextActions(job.id)
       });
     } else {
       print(renderJobDetail(job, payload, readLogTail(job.logFile)));
@@ -1249,13 +1557,13 @@ async function commandStatus(tokens) {
 
 async function commandResult(tokens) {
   const { flags, rest, errors, unknownFlags } = parseFlags(tokens, {
-    valueFlags: ["--timeout-ms"],
+    valueFlags: ["--timeout-ms", "--wait-timeout-ms"],
     booleanFlags: ["--json", "--wait", "--structured-only"]
   });
   if (
     rejectsFlagProblems(
       { errors, unknownFlags },
-      { command: "result", supported: "--json, --structured-only, --wait, --timeout-ms <ms>" }
+      { command: "result", supported: "--json, --structured-only, --wait, --wait-timeout-ms <ms>" }
     )
   ) {
     return;
@@ -1263,9 +1571,9 @@ async function commandResult(tokens) {
   const cwd = process.cwd();
   warnAboutStateLocation(cwd);
   const wantsWait = flags.has("--wait");
-  const timeout = resolveTimeoutMs(flags, STATUS_WAIT_DEFAULT_TIMEOUT_MS);
-  if (timeout.error) {
-    print(timeout.error);
+  const observer = resolveObserverOptions(flags);
+  if (observer.error) {
+    print(observer.error);
     process.exitCode = 1;
     return;
   }
@@ -1280,7 +1588,7 @@ async function commandResult(tokens) {
   if (job && wantsWait) {
     // findJob reconciles, so a job whose process died reaches a terminal state
     // and drops out of this loop instead of holding the caller to the deadline.
-    const deadline = Date.now() + timeout.timeoutMs;
+    const deadline = Date.now() + observer.waitTimeoutMs;
     while ((job.status === "running" || job.status === "queued") && Date.now() < deadline) {
       await sleep(STATUS_WAIT_POLL_MS);
       job = findJob(cwd, job.id) ?? job;
@@ -1299,6 +1607,21 @@ async function commandResult(tokens) {
 
   const payload = readJobFile(cwd, job.id);
   if (!payload) {
+    const waitExpired = wantsWait && !isTerminalJob(job);
+    if (flags.has("--json")) {
+      printJson({
+        schemaVersion: 2,
+        jobId: job.id,
+        job: withElapsed(job),
+        payload: null,
+        resultComplete: false,
+        wait: { requested: wantsWait, timeoutMs: observer.waitTimeoutMs, expired: waitExpired },
+        warnings: observer.warnings,
+        nextAction: nextActions(job.id)
+      });
+      process.exitCode = 1;
+      return;
+    }
     if (job.status === "running" || job.status === "queued") {
       print(`Job ${job.id} is still ${job.status}. Check /opencode:status ${job.id} for progress.`);
     } else {
@@ -1312,7 +1635,16 @@ async function commandResult(tokens) {
     // Same reason as `status --json`, and more load-bearing here: called
     // without an id this command picks the newest finished job, so the id it
     // settled on is information the caller has no other way to obtain.
-    printJson({ jobId: job.id, job, payload: { ...payload, rendered: undefined } });
+    printJson({
+      schemaVersion: 2,
+      jobId: job.id,
+      job: withElapsed(job),
+      payload: { ...payload, rendered: undefined },
+      resultComplete: payload.resultComplete ?? job.resultComplete ?? null,
+      wait: { requested: wantsWait, timeoutMs: observer.waitTimeoutMs, expired: false },
+      warnings: observer.warnings,
+      nextAction: nextActions(job.id)
+    });
     return;
   }
 
@@ -1354,7 +1686,12 @@ async function commandResult(tokens) {
 }
 
 function commandCancel(tokens) {
-  const { rest } = parseFlags(tokens, { booleanFlags: [] });
+  const { flags, rest, errors, unknownFlags } = parseFlags(tokens, { booleanFlags: ["--json"] });
+  if (errors.length > 0 || unknownFlags.length > 0) {
+    print(`Invalid arguments: ${[...errors, ...unknownFlags.map((flag) => `unknown flag ${flag}`)].join("; ")}`);
+    process.exitCode = 1;
+    return;
+  }
   const cwd = process.cwd();
   warnAboutStateLocation(cwd);
   const job = pickJob(cwd, rest[0] ?? null, (candidate) =>
@@ -1367,24 +1704,45 @@ function commandCancel(tokens) {
     return;
   }
   if (!["running", "queued"].includes(job.status)) {
-    print(`Job ${job.id} is already ${describeJobStatus(job)}; nothing to cancel.`);
+    if (flags.has("--json")) {
+      printJson({ schemaVersion: 2, jobId: job.id, job: publicJob(job), changed: false, warnings: [], nextAction: nextActions(job.id) });
+    } else {
+      print(`Job ${job.id} is already ${describeJobStatus(job)}; nothing to cancel.`);
+    }
     return;
   }
 
-  const terminated = terminateProcessTree(job.childPid ?? Number.NaN);
+  const cancelRequestedAt = new Date().toISOString();
+  upsertJob(cwd, { id: job.id, cancelRequestedAt });
+  const terminated = terminateProcessTree(job.childPid ?? job.workerPid ?? Number.NaN);
   upsertJob(cwd, {
     id: job.id,
     status: "cancelled",
     // Terminal verdict: drop any `orphaned` label a reader wrote in between.
     failureClass: null,
-    endedAt: new Date().toISOString(),
+    resultComplete: false,
+    cancelRequestedAt,
+    endedAt: cancelRequestedAt,
     summary: "cancelled by user"
   });
-  print(
-    terminated
-      ? `Cancelled job ${job.id}.`
-      : `Marked job ${job.id} as cancelled (its process had already exited).`
-  );
+  const cancelled = findJob(cwd, job.id, { reconcile: false });
+  if (flags.has("--json")) {
+    printJson({
+      schemaVersion: 2,
+      jobId: job.id,
+      job: publicJob(cancelled),
+      changed: true,
+      signalSent: terminated,
+      warnings: [],
+      nextAction: nextActions(job.id)
+    });
+  } else {
+    print(
+      terminated
+        ? `Cancelled job ${job.id}.`
+        : `Marked job ${job.id} as cancelled (its process had already exited).`
+    );
+  }
 }
 
 function commandTaskResumeCandidate(tokens) {
@@ -1514,10 +1872,11 @@ async function commandTransfer(tokens) {
 // prompt, which answered with a help page for the *opencode CLI* — flags that
 // this companion has never had.
 const EXECUTION_FLAG_NOTE = [
-  "  --background            rejected: it is a Claude Code execution flag. The companion",
-  "                          always runs in the foreground. Detach with",
-  "                          Bash(run_in_background: true), or use /opencode:rescue --background.",
-  "  --wait                  accepted no-op (foreground is already the behaviour)."
+  "  --background            submit to a detached persistent worker and return jobId",
+  "  --wait                  explicitly select foreground observation (the default)",
+  "  --kill-after-ms <ms>    provider hard budget (default 900000)",
+  "  --wait-timeout-ms <ms>  observation budget; expiry leaves the job running",
+  "  --timeout-ms <ms>       deprecated context-sensitive alias; removed next minor"
 ];
 
 const SUBCOMMAND_HELP = {
@@ -1537,7 +1896,6 @@ const SUBCOMMAND_HELP = {
     "                          (completed, incomplete or failed tasks; never a cancelled",
     "                          or orphaned one — name those with --resume-session)",
     "  --resume-session <id>   continue exactly this opencode session, no heuristic",
-    "  --timeout-ms <ms>       companion-side deadline for the run (default 900000)",
     "  --                      before any task text: everything after it is task text,",
     "                          never flags. Inside task text a standalone -- is just",
     "                          part of the text.",
@@ -1562,7 +1920,6 @@ const SUBCOMMAND_HELP = {
     "  --variant <level>       reasoning variant",
     "  --json                  machine-readable result on stdout; a target with no changes",
     "                          in it is a JSON document too (outputState \"empty\", exit 0)",
-    "  --timeout-ms <ms>       companion-side deadline for the run (default 900000)",
     ...EXECUTION_FLAG_NOTE,
     "",
     "Any remaining text is passed to the reviewer as extra focus."
@@ -1583,7 +1940,6 @@ const SUBCOMMAND_HELP = {
     "                          it are labelled out-of-model and cannot block",
     "  --json                  machine-readable result on stdout; a target with no changes",
     "                          in it is a JSON document too (outputState \"empty\", exit 0)",
-    "  --timeout-ms <ms>       companion-side deadline for the run (default 900000)",
     ...EXECUTION_FLAG_NOTE,
     "",
     "Any remaining text is passed to the reviewer as extra focus."
@@ -1593,7 +1949,8 @@ const SUBCOMMAND_HELP = {
     "",
     "  --all                   include jobs from other Claude sessions",
     "  --wait                  block until the job reaches a terminal state",
-    "  --timeout-ms <ms>       bound for --wait (default 900000)",
+    "  --wait-timeout-ms <ms>  observation bound for --wait (default 900000)",
+    "  --timeout-ms <ms>       deprecated alias for --wait-timeout-ms; removed next minor",
     "  --json                  machine-readable result on stdout",
     "",
     "How long to wait: measured on the recorded corpus, an opencode run finishes",
@@ -1602,14 +1959,15 @@ const SUBCOMMAND_HELP = {
     "is below this runtime's median, so budget above it: 16 of 19 recorded",
     "three-way aggregations recorded an empty opencode slot whose answer arrived",
     "shortly after the decision had been made. `--wait` returns as soon as the job",
-    "is terminal, so a generous --timeout-ms costs nothing when the run is quick.",
+    "is terminal, so a generous --wait-timeout-ms costs nothing when the run is quick.",
     "`--all --json` gives every job's elapsedMs and resultComplete in one call."
   ],
   result: [
     "usage: opencode-companion result [job-id] [flags]",
     "",
     "  --wait                  block until the job reaches a terminal state, then print it",
-    "  --timeout-ms <ms>       bound for --wait (default 900000)",
+    "  --wait-timeout-ms <ms>  observation bound for --wait (default 900000)",
+    "  --timeout-ms <ms>       deprecated alias for --wait-timeout-ms; removed next minor",
     "  --json                  the stored payload as JSON — use this to feed scripts,",
     "                          never head -c/tail -c on the rendered text",
     "  --structured-only       print only the review JSON object (exit 1 if there is none, or",
@@ -1672,21 +2030,18 @@ function commandHelp(subcommand = null) {
       "",
       "Subcommands (run `<subcommand> --help` for its flags):",
       "  setup [--json] [--enable-review-gate|--disable-review-gate]",
-      "  task [--json] [--model <provider/model>] [--variant <v>] [--write|--read-only] [--resume-last|--resume-session <id>] [--timeout-ms <ms>] <task text>",
+      "  task [--json] [--background|--wait] [--kill-after-ms <ms>] [--wait-timeout-ms <ms>] [--model <provider/model>] [--write|--read-only] <task text>",
       "  review [--base <ref|A..B> [--head <ref>]] [--paths <globs>] [--scope ...] [--model <m>] [--json] [focus text]",
       "  adversarial-review [--base <ref|A..B> [--head <ref>]] [--paths <globs>] [--threat-model <text>] [focus text]",
-      "  status [job-id] [--all] [--wait] [--timeout-ms <ms>] [--json]",
-      "  result [job-id] [--wait] [--timeout-ms <ms>] [--json|--structured-only]",
+      "  status [job-id] [--all] [--wait] [--wait-timeout-ms <ms>] [--json]",
+      "  result [job-id] [--wait] [--wait-timeout-ms <ms>] [--json|--structured-only]",
       "  cancel [job-id]",
       "  task-resume-candidate [--json]",
       "  transfer [--source <claude-jsonl>] [--model <provider/model>]",
       "",
-      "--timeout-ms bounds one opencode run (task/review, default 900000) or one",
-      "wait loop (status/result, default 900000). `opencode run` has no timeout of",
-      "its own, so this is the only deadline a stuck run has.",
-      "--background and --wait are Claude Code execution flags, not companion flags:",
-      "the companion always runs in the foreground. Detach with",
-      "Bash(run_in_background: true), or use /opencode:rescue --background."
+      "--kill-after-ms bounds provider execution; --wait-timeout-ms only bounds observation.",
+      "The deprecated --timeout-ms alias maps by context and is removed next minor.",
+      "--background uses a detached worker; SessionEnd and caller timeouts do not cancel it."
     ].join("\n")
   );
 }
@@ -1709,7 +2064,7 @@ function wantsHelp(tokens) {
   return false;
 }
 
-async function main() {
+export async function main() {
   const [, , subcommand, ...restArgv] = process.argv;
   // Slash commands forward `$ARGUMENTS` as one string that needs tokenizing;
   // programmatic callers (like the stop gate) pass pre-split argv whose
@@ -1754,7 +2109,7 @@ async function main() {
   }
 }
 
-main().catch((error) => {
+function reportMainError(error) {
   // A store owned by another plugin is a configuration problem, not a crash:
   // the message says exactly what to fix, and a stack trace only buries it.
   const message =
@@ -1765,4 +2120,8 @@ main().catch((error) => {
         : String(error);
   process.stderr.write(`${message}\n`);
   process.exitCode = 1;
-});
+}
+
+if (process.env.OPENCODE_COMPANION_JOB_WORKER !== "1") {
+  main().catch(reportMainError);
+}

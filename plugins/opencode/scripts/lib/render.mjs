@@ -146,8 +146,8 @@ export function renderTaskFailure(job, payload) {
   const lines = [`opencode ${job.kind} run failed (exit code ${payload.exitCode ?? "unknown"}).`];
   if (payload.timedOut) {
     lines.push(
-      `The run was stopped by the companion after ${payload.timeoutMs}ms (--timeout-ms); opencode itself has no timeout flag.`,
-      "Re-run with a larger --timeout-ms, or narrow the task."
+      `The run was stopped by the detached worker after ${payload.timeoutMs}ms (--kill-after-ms); opencode itself has no timeout flag.`,
+      "Re-run with a larger --kill-after-ms, or narrow the task."
     );
   }
   if (payload.interrupted) {
